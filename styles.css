@@ -293,3 +293,10 @@ body.theme-dark {
 .wtl-picker-input { flex: 1; min-width: 80px; border: none !important; box-shadow: none !important; background: transparent !important; padding: 2px; height: 24px; }
 .wtl-review-type .wtl-picker { max-width: none; flex: 1; }
 .wtl-suggest-use { font-weight: 600; }
+
+/* Unsaved label: highlighted field + save button */
+.wtl-picker-wrap { display: flex; align-items: center; gap: 4px; width: 100%; max-width: 420px; }
+.wtl-review-type .wtl-picker-wrap { max-width: none; flex: 1; }
+.wtl-picker-save { display: none; height: 28px; padding: 0 10px; }
+.wtl-picker-wrap.is-dirty .wtl-picker-save { display: inline-flex; }
+.wtl-picker-wrap.is-dirty .wtl-picker { border-color: var(--interactive-accent); }

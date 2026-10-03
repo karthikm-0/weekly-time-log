@@ -1532,8 +1532,8 @@ function labelItems(report, b) {
 
 function itemSearchText(it) {
   const c = it.choice;
-  if (c.kind === 'task') return `${c.task.desc} ${c.task.tags.map(t => '#' + t).join(' ')}`;
-  if (c.kind === 'tag') return hashes(c.tags);
+  if (c.kind === 'task') return c.task.desc; // by name only, so "#meeting" never matches a task
+  if (c.kind === 'tag') return c.tags.join(' ');
   return 'Not task work';
 }
 
@@ -1562,14 +1562,23 @@ function rankLabels(items, query, picked = { tasks: [], tags: [] }) {
   if (!q) {
     out = pool.filter(i => i.suggested || i.likely);
   } else {
-    const fuzzy = prepareFuzzySearch(q.replace(/^#/, ''));
+    const wantsTag = q.startsWith('#');
+    const qq = q.replace(/^#+/, '').toLowerCase();
+    const fuzzy = prepareFuzzySearch(qq);
     const hits = [];
     for (const it of pool) {
-      const f = fuzzy(itemSearchText(it));
-      if (f) {
-        const usage = it.count ? Math.min(0.5, Math.log10(1 + it.count) / 4) : 0;
-        hits.push({ it, score: f.score + (it.suggested ? 2 : it.likely ? 1 : 0) + usage });
-      }
+      if (wantsTag && it.choice.kind !== 'tag') continue;
+      const text = itemSearchText(it).toLowerCase();
+      const f = fuzzy(text);
+      if (!f) continue;
+      // What you typed decides; suggestions and usage only break ties.
+      let score = f.score;
+      if (text === qq) score += 4;
+      else if (text.startsWith(qq)) score += 3;
+      else if (text.split(/[\s/_-]+/).some(w => w.startsWith(qq))) score += 2;
+      else if (text.includes(qq)) score += 1;
+      score += (it.suggested ? 0.3 : it.likely ? 0.15 : 0) + (it.count ? Math.min(0.3, Math.log10(1 + it.count) / 6) : 0);
+      hits.push({ it, score });
     }
     hits.sort((a, b) => b.score - a.score);
     out = hits.map(h => h.it).slice(0, 30);
@@ -1601,9 +1610,14 @@ class LabelPicker {
     this.initial = initial;
     this.onCommit = onCommit;
     this.replaceable = replaceable;
-    this.el = parent.createDiv({ cls: 'wtl-picker' });
+    this.wrap = parent.createDiv({ cls: 'wtl-picker-wrap' });
+    this.el = this.wrap.createDiv({ cls: 'wtl-picker' });
     this.chipsEl = this.el.createSpan({ cls: 'wtl-chips' });
     this.input = this.el.createEl('input', { type: 'text', cls: 'wtl-picker-input', attr: { placeholder, spellcheck: 'false' } });
+    // Shown while there are unsaved changes; nothing is ever dropped silently.
+    this.saveBtn = this.wrap.createEl('button', { cls: 'wtl-picker-save mod-cta', text: '✓' });
+    this.saveBtn.setAttr('aria-label', 'Save label (Enter on an empty field)');
+    this.saveBtn.onclick = e => { e.stopPropagation(); this.commit(makeChoice(this.tasks, this.tags)); };
     this.reset();
     this.suggest = new LabelSuggest(app, this.input, this);
     this.input.addEventListener('keydown', e => {
@@ -1612,9 +1626,30 @@ class LabelPicker {
         if (this.tags.length) this.tags.pop(); else this.tasks.pop();
         this.untouched = false;
         this.changed();
+      } else if (e.key === 'Escape' && this.isDirty()) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.input.value = '';
+        this.reset();
+      } else if (e.key === 'Enter' && !this.suggest.isOpen) {
+        // The list is closed: Enter still does the obvious thing.
+        e.preventDefault();
+        if (this.input.value.trim()) {
+          const best = this.suggest.getSuggestions(this.input.value).find(i => !i.commit);
+          if (best && best.choice.kind !== 'none') this.add(best.choice);
+        } else if (this.isDirty()) {
+          this.commit(makeChoice(this.tasks, this.tags));
+        }
       }
     });
     this.el.addEventListener('click', () => this.input.focus());
+  }
+
+  isDirty() {
+    if (this.input.value.trim()) return true;
+    if (this.untouched) return false;
+    const now = makeChoice(this.tasks, this.tags);
+    return choiceValue(now) !== choiceValue(this.initial);
   }
 
   reset() {
@@ -1627,6 +1662,7 @@ class LabelPicker {
 
   renderChips() {
     this.chipsEl.empty();
+    this.wrap.toggleClass('is-dirty', !this.untouched && choiceValue(makeChoice(this.tasks, this.tags)) !== choiceValue(this.initial));
     this.el.toggleClass('is-pending', this.replaceable && this.untouched && !!(this.tasks.length || this.tags.length));
     const chip = (text, cls, onRemove) => {
       const c = this.chipsEl.createSpan({ cls: `wtl-chip ${cls}` });
@@ -1668,6 +1704,16 @@ class LabelSuggest extends AbstractInputSuggest {
     this.limit = 40;
     // Show suggestions as soon as the field is focused.
     inputEl.addEventListener('focus', () => inputEl.dispatchEvent(new Event('input')));
+  }
+
+  open() {
+    super.open();
+    this.isOpen = true;
+  }
+
+  close() {
+    super.close();
+    this.isOpen = false;
   }
 
   getSuggestions(query) {
@@ -1730,7 +1776,28 @@ class TimeLogView extends ItemView {
     await this.refresh();
   }
 
-  async refresh() {
+  /** True while a label field in this view has focus (or unsaved chips). */
+  editing() {
+    const a = document.activeElement;
+    return !!(a && this.contentEl.contains(a) && a.closest('.wtl-picker-wrap'))
+      || !!this.contentEl.querySelector('.wtl-picker-wrap.is-dirty');
+  }
+
+  /** Background redraws (theme/colour changes, other views) wait until you're done editing. */
+  deferIfEditing(fn) {
+    if (!this.editing()) return false;
+    this.deferred = fn;
+    if (!this.deferWatch) {
+      this.deferWatch = true;
+      this.registerDomEvent(this.contentEl, 'focusout', () => window.setTimeout(() => {
+        if (this.deferred && !this.editing()) { const f = this.deferred; this.deferred = null; f(); }
+      }, 50));
+    }
+    return true;
+  }
+
+  async refresh(force = false) {
+    if (!force && this.deferIfEditing(() => this.refresh(true))) return;
     const root = this.contentEl;
     root.empty();
     this.renderNav(root, null);
@@ -1746,14 +1813,15 @@ class TimeLogView extends ItemView {
     }
   }
 
-  rerender() {
+  rerender(force = false) {
+    if (!force && this.deferIfEditing(() => this.rerender(true))) return;
     const top = this.contentEl.scrollTop;
     this.render();
     this.contentEl.scrollTop = top;
   }
 
   review() {
-    this.plugin.openReview(this.report, () => this.rerender());
+    this.plugin.openReview(this.report, () => this.rerender(true));
   }
 
   /** Re-save the CSV a moment after the last edit in the table. */
@@ -1768,7 +1836,7 @@ class TimeLogView extends ItemView {
     const pending = this.report.blocks.filter(b => b.status === 'suggested').map(b => [b, b.suggestion]);
     for (const [b, s] of pending) await this.plugin.annotate(this.report, b, s);
     new Notice(`Confirmed ${plural(pending.length, 'suggestion')}.`);
-    this.rerender();
+    this.rerender(true);
     this.scheduleSave();
   }
 
@@ -1858,7 +1926,7 @@ class TimeLogView extends ItemView {
       b.onclick = async () => {
         this.plugin.settings.view = d.id;
         await this.plugin.saveSettings();
-        this.rerender();
+        this.rerender(true);
       };
     }
     if (dim.id === 'tag' && report.blocks.some(b => b.tags.length > 1)) {
@@ -1918,21 +1986,17 @@ class TimeLogView extends ItemView {
       tr.createEl('td', { text: fmtHours(b.hours), cls: 'wtl-num' });
 
       const cell = tr.createEl('td', { cls: 'wtl-label-cell' });
-      const picker = new LabelPicker(this.app, cell, labelItems(report, b), b.choice, async choice => {
+      new LabelPicker(this.app, cell, labelItems(report, b), b.choice, async choice => {
         await this.plugin.annotate(report, b, choice);
-        this.rerender();
+        this.rerender(true);
         this.scheduleSave();
       }, { placeholder: b.choice ? '' : 'Add a task or #tag…', replaceable: b.status !== 'confirmed' });
-      // Leaving the field without saving puts the label back.
-      picker.input.addEventListener('blur', () => window.setTimeout(() => {
-        if (!picker.el.contains(document.activeElement)) { picker.input.value = ''; picker.reset(); }
-      }, 300));
       if (b.status === 'confirmed' && b.suggestion && choiceValue(b.suggestion) !== choiceValue(b.choice)) {
         const reset = cell.createEl('button', { cls: 'wtl-accept clickable-icon', text: '↺' });
         reset.setAttr('aria-label', `Forget my label (suggestion: ${choiceLabel(b.suggestion)})`);
         reset.onclick = async () => {
           await this.plugin.annotate(report, b, null);
-          this.rerender();
+          this.rerender(true);
           this.scheduleSave();
         };
       }
@@ -1945,7 +2009,7 @@ class TimeLogView extends ItemView {
         ok.setAttr('aria-label', 'Accept suggestion');
         ok.onclick = async () => {
           await this.plugin.annotate(report, b, b.suggestion);
-          this.rerender();
+          this.rerender(true);
           this.scheduleSave();
         };
       }
