@@ -773,8 +773,18 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
    */
   watchCalendar() {
     let ticks = 0;
+    let wasSettled = false;
+    const redraw = () => {
+      this.refreshBlocks();
+      this.refreshViews();
+    };
     const check = async () => {
       ticks++;
+      // Anything drawn while the calendar was still loading gets one redraw once it settles.
+      if (!wasSettled && this.calendarSettled()) {
+        wasSettled = true;
+        redraw();
+      }
       if (ticks > 40 && ticks % 20 !== 0) return; // after ~2 min: once a minute
       if (!this.settings.token) return;
       let sig;
@@ -790,13 +800,11 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         this.silent = false;
       }
       if (sig === this.calendarSig) return;
-      const first = this.calendarSig === undefined;
       this.calendarSig = sig;
       this.calendarChangedAt = Date.now();
-      if (!first) {
-        this.refreshBlocks();
-        this.refreshViews();
-      }
+      // Includes the first successful read: notes are drawn while Obsidian restores
+      // tabs, often before this watcher starts, and may show an empty week.
+      redraw();
     };
     check();
     this.registerInterval(window.setInterval(check, 3000));
