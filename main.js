@@ -424,8 +424,75 @@ function legend(container, items) {
   }
 }
 
-/** Hours per day as columns: work, with "not task work" stacked on top. */
-function renderDays(container, report, tip) {
+// Categorical colours: the validated 8-slot palette (light/dark steps live in
+// styles.css as --wtl-c1..8). Stacks follow slot order, which is what keeps
+// neighbouring colours distinguishable, including for colour-blind readers.
+const SLOTS = 8;
+
+/**
+ * The categories a block counts toward in the daily charts, as [{ key, label, share }].
+ * Shares add up to 1 so days never inflate: in the Tag view a block with two tags
+ * gives each half its hours. "Not task work" is left out of the coloured charts.
+ */
+function blockCategories(b, dim) {
+  if (isOther(b)) return [];
+  if (dim.id === 'tag') {
+    const tags = [...new Set(b.tags)];
+    if (!tags.length) return [{ key: '~', label: 'Untagged', share: 1 }];
+    return tags.map(t => ({ key: t, label: `#${t}`, share: 1 / tags.length }));
+  }
+  if (dim.id === 'calendar') return [{ key: b.calendarId, label: b.calendar, share: 1 }];
+  if (dim.id === 'task') {
+    const leaf = taskLeaf(b);
+    return [{ key: leaf.key, label: leaf.label, share: 1 }];
+  }
+  const v = tagValue(b.tags, dim.group);
+  return [v ? { key: v, label: v, share: 1 } : { key: '~', label: `No ${dim.label.toLowerCase()}`, share: 1 }];
+}
+
+/** Per-day hours by category, with colour slots resolved; uncoloured keys fold into one grey bucket. */
+function categoryDays(report, color) {
+  const days = dayRows(report);
+  const labels = new Map();
+  const week = new Map();
+  for (const d of days) {
+    d.cats = new Map();
+    for (const b of d.blocks) {
+      for (const c of blockCategories(b, color.dim)) {
+        labels.set(c.key, c.label);
+        const slot = color.slots.get(c.key);
+        const k = slot ? c.key : '~other';
+        bump(d.cats, k, b.hours * c.share);
+        bump(week, c.key, b.hours * c.share);
+      }
+    }
+  }
+  const folded = [...week.keys()].filter(k => !color.slots.get(k));
+  const otherLabel = folded.length === 1 ? labels.get(folded[0]) : 'Other';
+  // Legend order = stack order = slot order; grey bucket last.
+  const keys = [...week.keys()].filter(k => color.slots.get(k)).sort((a, b) => color.slots.get(a) - color.slots.get(b));
+  const series = keys.map(k => ({ key: k, label: labels.get(k), slot: color.slots.get(k), hours: week.get(k) }));
+  if (folded.length) {
+    series.push({ key: '~other', label: otherLabel, slot: null, hours: folded.reduce((a, k) => a + week.get(k), 0), folded: folded.map(k => labels.get(k)) });
+  }
+  return { days, series };
+}
+
+const swatchClass = slot => (slot ? `wtl-c${slot}` : 'is-neutral');
+
+/** Height for one stacked segment: its share of the track minus its share of the 2px gaps. */
+function segHeight(h, max, n) {
+  const f = h / max;
+  return `calc(${f * 100}% - ${(f * 2 * Math.max(0, n - 1)).toFixed(2)}px)`;
+}
+
+/** Legend values: always one decimal ("10.5 h", "3 h"). */
+function fmtHours1(h) {
+  return h.toFixed(1).replace(/\.0$/, '');
+}
+
+/** Hours per day as columns: plain (work + "not task work"), or stacked by category. */
+function renderDays(container, report, tip, color = null) {
   const days = dayRows(report);
   const work = days.reduce((a, d) => a + d.work, 0);
   const active = days.filter(d => d.work > 0);
@@ -435,8 +502,10 @@ function renderDays(container, report, tip) {
   if (busiest && active.length > 1) parts.push(`most on ${busiest.day.format('ddd')} (${fmtHours(busiest.work)} h)`);
   container.createDiv({ cls: 'wtl-days-summary', text: parts.join(' · ') });
 
-  const max = Math.max(1, ...days.map(d => d.total));
   const today = moment().format('YYYY-MM-DD');
+  if (color) return renderCategoryDays(container, report, tip, color, today);
+
+  const max = Math.max(1, ...days.map(d => d.total));
   const cols = container.createDiv({ cls: 'wtl-days' });
   for (const d of days) {
     const col = cols.createDiv({ cls: 'wtl-day' + (d.iso === today ? ' is-today' : '') + (d.total ? '' : ' is-empty') });
@@ -447,7 +516,7 @@ function renderDays(container, report, tip) {
     if (d.other) segs.push([' is-other', d.other]);
     segs.forEach(([cls, h], i) => {
       const seg = track.createDiv({ cls: `wtl-day-seg${cls}${i === segs.length - 1 ? ' is-top' : ''}` });
-      seg.style.height = `${(h / max) * 100}%`;
+      seg.style.height = segHeight(h, max, segs.length);
     });
     col.createDiv({ cls: 'wtl-day-label', text: d.day.format('ddd') });
     col.createDiv({ cls: 'wtl-day-sub', text: d.day.format('D') });
@@ -456,8 +525,44 @@ function renderDays(container, report, tip) {
   if (days.some(d => d.other)) legend(container, [['', 'Work'], ['is-other', 'Not task work']]);
 }
 
+function renderCategoryDays(container, report, tip, color, today) {
+  const { days, series } = categoryDays(report, color);
+  const max = Math.max(1, ...days.map(d => d.work));
+  const cols = container.createDiv({ cls: 'wtl-days' });
+  for (const d of days) {
+    const col = cols.createDiv({ cls: 'wtl-day' + (d.iso === today ? ' is-today' : '') + (d.work ? '' : ' is-empty') });
+    col.createDiv({ cls: 'wtl-day-value', text: d.work ? fmtHours(d.work) : '' });
+    const track = col.createDiv({ cls: 'wtl-day-track' });
+    const segs = series.filter(sr => d.cats.get(sr.key));
+    segs.forEach((sr, i) => {
+      const seg = track.createDiv({ cls: `wtl-day-seg ${swatchClass(sr.slot)}${i === segs.length - 1 ? ' is-top' : ''}` });
+      seg.style.height = segHeight(d.cats.get(sr.key), max, segs.length);
+    });
+    col.createDiv({ cls: 'wtl-day-label', text: d.day.format('ddd') });
+    col.createDiv({ cls: 'wtl-day-sub', text: d.day.format('D') });
+    const lines = [d.day.format('ddd MMM D'), `${d.work.toFixed(2)} h work`];
+    for (const sr of [...segs].reverse()) lines.push(`  ${sr.label}  ${d.cats.get(sr.key).toFixed(2)} h`);
+    if (d.other) lines.push(`not task work ${d.other.toFixed(2)} h (not shown)`);
+    tip(col, lines.join('\n'));
+  }
+  // Legend doubles as the labels: colour plus the week's hours as text.
+  const lg = container.createDiv({ cls: 'wtl-legend is-wrap' });
+  for (const sr of series) {
+    const it = lg.createSpan({ cls: 'wtl-legend-item' });
+    it.createSpan({ cls: `wtl-swatch ${swatchClass(sr.slot)}` });
+    it.createSpan({ text: sr.label });
+    it.createSpan({ cls: 'wtl-legend-value', text: `${fmtHours1(sr.hours)} h` });
+    if (sr.folded && sr.folded.length > 1) it.setAttr('aria-label', sr.folded.join(', '));
+  }
+  const hidden = days.reduce((a, d) => a + d.other, 0);
+  const notes = [];
+  if (hidden) notes.push(`Not task work (${fmtHours1(hidden)} h) isn't shown.`);
+  if (color.dim.id === 'tag' && report.blocks.some(b => b.tags.length > 1)) notes.push('Blocks with several tags are split evenly between them.');
+  if (notes.length) container.createDiv({ cls: 'wtl-muted wtl-days-note', text: notes.join(' ') });
+}
+
 /** One row per day across the hours of the day; each block where it happened. */
-function renderTimeline(container, report, tip) {
+function renderTimeline(container, report, tip, color = null) {
   const days = dayRows(report);
   let lo = 24;
   let hi = 0;
@@ -495,7 +600,13 @@ function renderTimeline(container, report, tip) {
     for (const b of d.blocks) {
       const s0 = hourOf(b.start);
       const e0 = b.end.isSame(b.start, 'day') ? hourOf(b.end) : 24;
-      const rect = track.createDiv({ cls: 'wtl-tl-block' + (isOther(b) ? ' is-other' : '') });
+      let cls = isOther(b) ? ' is-other' : '';
+      if (color && !isOther(b)) {
+        // Coloured by its largest category (first, for an even split).
+        const cats = blockCategories(b, color.dim);
+        cls = ' ' + swatchClass(cats.length ? color.slots.get(cats[0].key) : null);
+      }
+      const rect = track.createDiv({ cls: 'wtl-tl-block' + cls });
       rect.style.left = pct(s0);
       rect.style.width = `${((e0 - s0) / span) * 100}%`;
       const label = b.choice ? choiceLabel(b.choice) : 'Unattached';
@@ -503,7 +614,22 @@ function renderTimeline(container, report, tip) {
     }
     row.createDiv({ cls: 'wtl-tl-total', text: d.work ? `${fmtHours(d.work)} h` : '' });
   }
-  if (report.blocks.some(isOther)) legend(container, [['', 'Work'], ['is-other', 'Not task work']]);
+  if (color) {
+    const { series } = categoryDays(report, color);
+    const lg = container.createDiv({ cls: 'wtl-legend is-wrap' });
+    for (const sr of series) {
+      const it = lg.createSpan({ cls: 'wtl-legend-item' });
+      it.createSpan({ cls: `wtl-swatch ${swatchClass(sr.slot)}` });
+      it.createSpan({ text: sr.label });
+    }
+    if (report.blocks.some(isOther)) {
+      const it = lg.createSpan({ cls: 'wtl-legend-item' });
+      it.createSpan({ cls: 'wtl-swatch is-other is-outline' });
+      it.createSpan({ text: 'Not task work' });
+    }
+  } else if (report.blocks.some(isOther)) {
+    legend(container, [['', 'Work'], ['is-other', 'Not task work']]);
+  }
 }
 
 module.exports = class WeeklyTimeLogPlugin extends Plugin {
@@ -1120,6 +1246,51 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     return this.rescore({ start, end, blocks, tasks, tagCounts: this.collectVaultTags() });
   }
 
+  // ---- Colours -------------------------------------------------------------
+
+  /**
+   * Colour slots for a dimension, keyed by category. Colour follows the category,
+   * not this week's ranking: grouping values use their order in settings;
+   * tags/calendars/tasks keep the slot they were first given (stored in the data
+   * file), and when all 8 are taken the least recently seen one is reused.
+   */
+  colorsFor(report, dim) {
+    if (!dim || dim.id === 'none') return null;
+    const slots = new Map();
+    if (dim.group) {
+      dim.group.values.slice(0, SLOTS).forEach((v, i) => slots.set(v.name, i + 1));
+      return { dim, slots };
+    }
+    const hours = new Map();
+    for (const b of report.blocks) for (const c of blockCategories(b, dim)) if (c.key !== '~') bump(hours, c.key, b.hours * c.share);
+    const all = (this.settings.colors = this.settings.colors || {});
+    const store = (all[dim.id] = all[dim.id] || {});
+    const week = report.start.format('YYYY-MM-DD');
+    let changed = false;
+    for (const key of [...hours.keys()].sort((a, b) => hours.get(b) - hours.get(a))) {
+      if (!store[key]) {
+        const used = new Set(Object.values(store).map(e => e.slot));
+        let slot = [...Array(SLOTS).keys()].map(i => i + 1).find(n => !used.has(n));
+        if (!slot) {
+          const victim = Object.entries(store)
+            .filter(([k]) => !hours.has(k))
+            .sort((a, b) => a[1].seen.localeCompare(b[1].seen))[0];
+          if (!victim) continue; // more than 8 categories this week: the rest fold into "Other"
+          slot = victim[1].slot;
+          delete store[victim[0]];
+        }
+        store[key] = { slot, seen: week };
+        changed = true;
+      } else if (store[key].seen < week) {
+        store[key].seen = week;
+        changed = true;
+      }
+      slots.set(key, store[key].slot);
+    }
+    if (changed) this.saveSettings();
+    return { dim, slots };
+  }
+
   // ---- Export --------------------------------------------------------------
 
   toCsv(report) {
@@ -1480,14 +1651,19 @@ class TimeLogView extends ItemView {
     });
   }
 
+  currentColors(report) {
+    return this.plugin.colorsFor(report, findDimension(this.plugin.settings, this.plugin.settings.view));
+  }
+
   renderByDay(card, report) {
-    card.createEl('h4', { text: 'Hours by day' });
-    renderDays(card, report, (el, text) => this.hover(el, text));
+    const color = this.currentColors(report);
+    card.createEl('h4', { text: `Hours by day${color ? `, by ${color.dim.label.toLowerCase()}` : ''}` });
+    renderDays(card, report, (el, text) => this.hover(el, text), color);
   }
 
   renderTimelineCard(card, report) {
     card.createEl('h4', { text: 'When you worked' });
-    renderTimeline(card, report, (el, text) => this.hover(el, text));
+    renderTimeline(card, report, (el, text) => this.hover(el, text), this.currentColors(report));
   }
 
   renderTable(card, report) {
@@ -1574,7 +1750,7 @@ class TimeLogView extends ItemView {
 // ```time-log``` block for weekly notes
 //
 //   week: this | last | 2026-09-28 | 2026-W40   (default: from the note's filename, else this week)
-//   group: Project | Role | tag | task          (default: last view picked in the full log)
+//   group: Project | Role | tag | task | calendar | none   (default: last view picked in the full log)
 //   show: full | chart | hours | days | timeline (default: full)
 
 /**
@@ -1666,8 +1842,10 @@ class TimeLogBlock extends MarkdownRenderChild {
     }
 
     const nativeTip = (node, text) => node.setAttr('aria-label', text);
-    if (show === 'days') return renderDays(el, report, nativeTip);
-    if (show === 'timeline') return renderTimeline(el, report, nativeTip);
+    // group: none = plain single-colour daily charts
+    const color = (this.opts.group || '').toLowerCase() === 'none' ? null : this.plugin.colorsFor(report, dim);
+    if (show === 'days') return renderDays(el, report, nativeTip, color);
+    if (show === 'timeline') return renderTimeline(el, report, nativeTip, color);
 
     const total = report.blocks.reduce((a, b) => a + b.hours, 0);
     const confirmed = report.blocks.filter(b => b.status === 'confirmed').reduce((a, b) => a + b.hours, 0);
@@ -1683,8 +1861,8 @@ class TimeLogBlock extends MarkdownRenderChild {
     stat(String(pending), 'to review');
 
     if (show === 'full' && report.blocks.length) {
-      el.createDiv({ cls: 'wtl-block-sub', text: 'By day' });
-      renderDays(el, report, nativeTip);
+      el.createDiv({ cls: 'wtl-block-sub', text: color ? `By day, by ${dim.label.toLowerCase()}` : 'By day' });
+      renderDays(el, report, nativeTip, color);
     }
 
     // Grouped bars (collapsed; click a group to see its tasks)

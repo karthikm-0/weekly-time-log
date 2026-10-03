@@ -239,3 +239,31 @@
 .wtl-legend-item { display: inline-flex; align-items: center; gap: 4px; }
 .wtl-swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--interactive-accent); }
 .wtl-swatch.is-other { background: var(--text-faint); opacity: 0.6; }
+
+/* Categorical palette (validated; light steps on white, dark steps on #1e1e1e).
+   Light slots 3-5 are under 3:1 on white, so legends always carry text values. */
+body {
+  --wtl-c1: #2a78d6; --wtl-c2: #eb6834; --wtl-c3: #1baf7a; --wtl-c4: #eda100;
+  --wtl-c5: #e87ba4; --wtl-c6: #008300; --wtl-c7: #4a3aa7; --wtl-c8: #e34948;
+}
+body.theme-dark {
+  --wtl-c1: #3987e5; --wtl-c2: #d95926; --wtl-c3: #199e70; --wtl-c4: #c98500;
+  --wtl-c5: #d55181; --wtl-c6: #008300; --wtl-c7: #9085e9; --wtl-c8: #e66767;
+}
+.wtl-c1 { background: var(--wtl-c1) !important; } .wtl-c2 { background: var(--wtl-c2) !important; }
+.wtl-c3 { background: var(--wtl-c3) !important; } .wtl-c4 { background: var(--wtl-c4) !important; }
+.wtl-c5 { background: var(--wtl-c5) !important; } .wtl-c6 { background: var(--wtl-c6) !important; }
+.wtl-c7 { background: var(--wtl-c7) !important; } .wtl-c8 { background: var(--wtl-c8) !important; }
+.is-neutral { background: var(--text-faint) !important; opacity: 0.55; }
+
+.wtl-legend.is-wrap { flex-wrap: wrap; row-gap: 4px; }
+.wtl-legend-value { color: var(--text-normal); font-variant-numeric: tabular-nums; }
+.wtl-days-note { margin-top: 4px; font-size: var(--font-ui-smaller); }
+
+/* "Not task work" in the timeline: dashed outline, so it never reads as a grey category */
+.wtl-tl-block.is-other {
+  background: transparent !important; opacity: 1;
+  border: 1px dashed var(--text-faint); box-shadow: none;
+}
+.wtl-timeline ~ .wtl-legend .wtl-swatch.is-other,
+.wtl-legend .wtl-swatch.is-other.is-outline { background: transparent; opacity: 1; border: 1px dashed var(--text-faint); }
