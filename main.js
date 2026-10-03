@@ -265,12 +265,13 @@ function tagValue(tags, group) {
   return null;
 }
 
-/** The ways the charts can be grouped: each tag group, then "Tag" and "Task". */
+/** The ways the charts can be grouped: each tag group, then Tag, Task, Calendar. */
 function dimensions(settings) {
   return [
     ...parseTagGroups(settings.tagGroups).map(g => ({ id: `group:${g.name}`, label: g.name, group: g })),
     { id: 'tag', label: 'Tag' },
     { id: 'task', label: 'Task' },
+    { id: 'calendar', label: 'Calendar' },
   ];
 }
 
@@ -302,6 +303,8 @@ function buildTree(blocks, dim) {
     let g0;
     if (dim.id === 'tag') {
       g0 = b.tags[0] ? { key: b.tags[0], label: `#${b.tags[0]}` } : { key: '~', label: 'Untagged', muted: true };
+    } else if (dim.id === 'calendar') {
+      g0 = { key: b.calendarId, label: b.calendar };
     } else {
       const v = tagValue(b.tags, dim.group);
       g0 = v ? { key: v, label: v } : { key: '~', label: `No ${dim.label.toLowerCase()}`, muted: true };
@@ -492,13 +495,22 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
     if (weekStart && leaf.view instanceof TimeLogView) {
       const { start } = await this.weekBounds(0);
-      leaf.view.offset = Math.round(weekStart.diff(start, 'days') / 7);
+      leaf.view.offset = Math.floor(weekStart.diff(start, 'days') / 7);
       await leaf.view.refresh();
     }
   }
 
   refreshViews() {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) leaf.view.refresh();
+    this.refreshBlocks();
+  }
+
+  /** Re-render every time-log block in open notes (debounced: reviews fire many changes). */
+  refreshBlocks() {
+    window.clearTimeout(this.blockTimer);
+    this.blockTimer = window.setTimeout(() => {
+      for (const b of this.liveBlocks || []) b.render();
+    }, 500);
   }
 
   // ---- Full Calendar access ----------------------------------------------
@@ -564,8 +576,8 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
   }
 
   /** The week containing `anchor` (default today), shifted by `offset` weeks. */
-  async weekBounds(offset = 0, anchor = null) {
-    let first = this.settings.weekStart;
+  async weekBounds(offset = 0, anchor = null, firstDay = null) {
+    let first = firstDay ?? this.settings.weekStart;
     if (first === 'calendar') first = (await this.calendarSources()).firstDay;
     first = Number(first) || 0;
     const day = (anchor ? moment(anchor) : moment()).startOf('day');
@@ -875,10 +887,11 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     }
     await this.saveSettings();
     this.rescore(report);
+    this.refreshBlocks();
   }
 
-  async buildReport(offset = 0, anchor = null) {
-    const { start, end } = await this.weekBounds(offset, anchor);
+  async buildReport(offset = 0, anchor = null, firstDay = null) {
+    const { start, end } = await this.weekBounds(offset, anchor, firstDay);
     const [blocks, tasks] = await Promise.all([
       this.collectBlocks(start, end),
       this.collectTasks(start.format('YYYY-MM-DD')),
@@ -1226,15 +1239,23 @@ class TimeLogView extends ItemView {
 //   group: Project | Role | tag | task          (default: last view picked in the full log)
 //   show: full | chart | hours                  (default: full)
 
-function parseWeekRef(ref) {
+/**
+ * Returns { anchor, iso } or null. ISO week references ("2026-W40", "W40") mean
+ * Monday–Sunday regardless of the week-start setting, matching weekly notes.
+ * `year` fills in references without one (e.g. from a "2026/" folder).
+ */
+function parseWeekRef(ref, year = null) {
   if (!ref) return null;
-  const r = ref.trim().toLowerCase();
-  if (r === 'this') return moment();
-  if (r === 'last') return moment().subtract(7, 'days');
-  let m = ref.match(/(\d{4})-?W(\d{1,2})/i);
-  if (m) return moment(`${m[1]}-W${m[2].padStart(2, '0')}-1`, 'GGGG-[W]WW-E');
-  m = ref.match(/\d{4}-\d{2}-\d{2}/);
-  if (m) return moment(m[0], 'YYYY-MM-DD');
+  const r = String(ref).trim().toLowerCase();
+  if (r === 'this') return { anchor: moment(), iso: false };
+  if (r === 'last') return { anchor: moment().subtract(7, 'days'), iso: false };
+  const iso = (y, w) => ({ anchor: moment(`${y}-W${String(w).padStart(2, '0')}-1`, 'GGGG-[W]WW-E'), iso: true });
+  let m = r.match(/(\d{4})[-\s_.]*w(\d{1,2})\b/);
+  if (m) return iso(m[1], m[2]);
+  m = r.match(/\d{4}-\d{2}-\d{2}/);
+  if (m) return { anchor: moment(m[0], 'YYYY-MM-DD'), iso: false };
+  m = r.match(/(?:^|[^a-z0-9])w(?:eek)?\s*(\d{1,2})\b/);
+  if (m) return iso(year || moment().isoWeekYear(), m[1]);
   return null;
 }
 
@@ -1247,12 +1268,29 @@ class TimeLogBlock extends MarkdownRenderChild {
       const m = line.match(/^\s*([\w-]+)\s*:\s*(.+?)\s*$/);
       if (m) this.opts[m[1].toLowerCase()] = m[2];
     }
-    const name = (sourcePath || '').split('/').pop().replace(/\.md$/, '');
-    this.anchor = parseWeekRef(this.opts.week) || parseWeekRef(name) || moment();
+    this.sourcePath = sourcePath || '';
+  }
+
+  /** Week from: block option, note property, filename, folder path; else today. */
+  resolveWeek() {
+    const path = this.sourcePath;
+    const name = path.split('/').pop().replace(/\.md$/, '');
+    const pathYear = (path.match(/(?:^|\/)(\d{4})(?:\/|$|[-_ ])/) || [])[1];
+    const fm = (this.plugin.app.metadataCache.getCache(path) || {}).frontmatter || {};
+    const year = fm.year || pathYear;
+    return parseWeekRef(this.opts.week, year)
+      || parseWeekRef(fm.week, year) || parseWeekRef(fm.date, year)
+      || parseWeekRef(name, year) || parseWeekRef(path, year)
+      || { anchor: moment(), iso: false, guessed: true };
   }
 
   onload() {
+    (this.plugin.liveBlocks = this.plugin.liveBlocks || new Set()).add(this);
     this.render();
+  }
+
+  onunload() {
+    if (this.plugin.liveBlocks) this.plugin.liveBlocks.delete(this);
   }
 
   async render() {
@@ -1261,7 +1299,8 @@ class TimeLogBlock extends MarkdownRenderChild {
     el.addClass('wtl-block');
     let report;
     try {
-      report = await this.plugin.buildReport(0, this.anchor);
+      this.week = this.resolveWeek();
+      report = await this.plugin.buildReport(0, this.week.anchor, this.week.iso ? 1 : null);
     } catch (e) {
       el.createDiv({ cls: 'wtl-error', text: `Time log: ${e.message}` });
       return;
@@ -1275,6 +1314,9 @@ class TimeLogBlock extends MarkdownRenderChild {
     const head = el.createDiv({ cls: 'wtl-block-head' });
     head.createSpan({ cls: 'wtl-block-title', text: 'Time log' });
     head.createSpan({ cls: 'wtl-muted', text: `${report.start.format('MMM D')} – ${report.end.clone().subtract(1, 'day').format('MMM D')}` });
+    if (this.week.guessed) {
+      head.createSpan({ cls: 'wtl-muted', text: '· current week (add "week: 2026-W40" to pin)' });
+    }
 
     const total = report.blocks.reduce((a, b) => a + b.hours, 0);
     const confirmed = report.blocks.filter(b => b.status === 'confirmed').reduce((a, b) => a + b.hours, 0);
