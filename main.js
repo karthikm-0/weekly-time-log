@@ -1123,14 +1123,19 @@ function rankLabels(items, query) {
       if (!out.length || (q.startsWith('#') && !tagHit)) out.unshift(create); else out.push(create);
     }
   }
-  // With tags already typed, offer to use exactly those.
-  if (prefix.length) out.unshift({ choice: { kind: 'tag', tags: prefix }, commit: true });
+  // With tags already typed, offer to use exactly those: first when nothing more is
+  // being typed (Enter saves), last while completing another tag.
+  if (prefix.length) {
+    const use = { choice: { kind: 'tag', tags: prefix }, commit: true };
+    if (q) out.push(use); else out.unshift(use);
+  }
   return out;
 }
 
 class LabelSuggest extends AbstractInputSuggest {
   constructor(app, inputEl, items, onPick) {
     super(app, inputEl);
+    this.input = inputEl;
     this.items = items;
     this.onPick = onPick;
     this.limit = 40;
@@ -1168,6 +1173,13 @@ class LabelSuggest extends AbstractInputSuggest {
   }
 
   selectSuggestion(it) {
+    if (it.choice.kind === 'tag' && !it.commit) {
+      // Tags stack: put them in the field and keep going. "Use …" (listed first) saves.
+      this.input.value = hashes(it.choice.tags) + ' ';
+      this.input.focus();
+      this.input.dispatchEvent(new Event('input'));
+      return;
+    }
     this.close();
     this.onPick(it.choice);
   }
@@ -1718,12 +1730,12 @@ class ReviewModal extends Modal {
     this.input = typed.createEl('input', {
       type: 'text',
       cls: 'wtl-label-input',
-      attr: { placeholder: 'Type a task, or #tags (several: #postdoc #meeting)…', spellcheck: 'false' },
+      attr: { placeholder: 'Type a task, or #tags: Enter adds each tag, then Enter on "Use …" saves', spellcheck: 'false' },
     });
     new LabelSuggest(this.app, this.input, labelItems(this.report, b), choice => this.choose(choice));
 
     const foot = el.createDiv({ cls: 'wtl-review-foot' });
-    foot.createDiv({ cls: 'wtl-muted', text: '1–9 choose · Enter accept suggestion · 0 not task work · / type · S skip · ← back' });
+    foot.createDiv({ cls: 'wtl-muted', text: '1–9 choose · Enter accept suggestion · 0 not task work · / type (tags stack until "Use …") · S skip · ← back' });
     const btns = foot.createDiv({ cls: 'wtl-review-buttons' });
     if (this.i > 0) btns.createEl('button', { text: 'Back' }).onclick = () => this.prev();
     btns.createEl('button', { text: 'Skip' }).onclick = () => this.next();
