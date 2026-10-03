@@ -2,7 +2,7 @@
 
 const {
   Plugin, ItemView, Modal, AbstractInputSuggest, MarkdownRenderChild, Notice, PluginSettingTab, Setting, moment,
-  normalizePath, prepareFuzzySearch, TFile,
+  normalizePath, prepareFuzzySearch, getAllTags, TFile,
 } = require('obsidian');
 
 const VIEW_TYPE = 'weekly-time-log-view';
@@ -716,6 +716,20 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     return blocks;
   }
 
+  /** tag (without #) -> number of uses across the vault. */
+  collectVaultTags() {
+    const counts = new Map();
+    const mc = this.app.metadataCache;
+    if (typeof mc.getTags === 'function') {
+      for (const [t, n] of Object.entries(mc.getTags())) counts.set(t.replace(/^#/, ''), n);
+    } else {
+      for (const f of this.app.vault.getMarkdownFiles()) {
+        for (const t of getAllTags(mc.getFileCache(f)) || []) bump(counts, t.replace(/^#/, ''), 1);
+      }
+    }
+    return counts;
+  }
+
   async collectTasks(weekStartIso) {
     const tasks = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
@@ -782,11 +796,11 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         offer(tg, w / votes.total, `you tagged ${plural(votes.n, 'similar block')} #${tg}`);
       }
     }
-    for (const tg of vocab) {
-      const tt = uniqTokens(tg);
+    for (const { tag, tokens: tt } of vocab) {
       if (!tt.length) continue;
       const cover = tt.filter(w => bTokens.some(x => sameWord(w, x))).length / tt.length;
-      if (cover >= 0.5) offer(tg, 0.8 * cover, `title matches #${tg}`);
+      // Full matches on more specific tags (#meeting/advisor) edge out general ones (#meeting).
+      if (cover >= 0.5) offer(tag, 0.8 * cover + (cover === 1 ? 0.03 * Math.min(3, tt.length - 1) : 0), `title matches #${tag}`);
     }
     for (const w of bTokens) {
       const n = model.tokenCount.get(w) || 0;
@@ -809,9 +823,17 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       t.tagTokens = [...new Set(t.tags.flatMap(tokens))];
       t.norm = norm(t.desc);
     }
-    const vocab = new Set(tasks.flatMap(t => t.tags));
-    for (const a of model.entries) for (const tg of a.tags || []) vocab.add(tg);
-    report.tagVocab = [...vocab].sort();
+    // Every tag you use anywhere in the vault, plus task tags and tags from past labels.
+    const counts = new Map(report.tagCounts || []);
+    const byLower = new Map();
+    const addTag = tg => { if (tg && !byLower.has(tg.toLowerCase())) byLower.set(tg.toLowerCase(), tg); };
+    for (const t of tasks) t.tags.forEach(addTag);
+    for (const a of model.entries) (a.tags || []).forEach(addTag);
+    for (const tg of counts.keys()) addTag(tg);
+    const countOf = tg => counts.get(tg) || counts.get(byLower.get(tg.toLowerCase())) || 0;
+    report.tagVocab = [...byLower.values()].sort((a, b) => countOf(b) - countOf(a) || a.localeCompare(b));
+    report.tagCount = countOf;
+    const vocab = report.tagVocab.map(tag => ({ tag, tokens: uniqTokens(tag) }));
 
     // Rarity weighting: words shared by many tasks ("write") count less than distinctive ones ("intro").
     const df = new Map();
@@ -955,7 +977,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       this.collectBlocks(start, end),
       this.collectTasks(start.format('YYYY-MM-DD')),
     ]);
-    return this.rescore({ start, end, blocks, tasks });
+    return this.rescore({ start, end, blocks, tasks, tagCounts: this.collectVaultTags() });
   }
 
   // ---- Export --------------------------------------------------------------
@@ -1024,9 +1046,13 @@ function labelItems(report, b) {
   if (b.suggestion) push(b.suggestion, { suggested: true, reasons: b.suggestion.reasons });
   for (const c of b.candidates.slice(0, 5)) push({ kind: 'task', task: c.task }, { likely: true, reasons: c.reasons });
   for (const t of b.tagRank.slice(0, 3)) push({ kind: 'tag', tag: t.tag }, { likely: true, reasons: [t.why] });
+  // Tasks planned for that day are likely even when the title doesn't match.
+  for (const t of report.tasks.filter(t => t.scheduled === b.date).slice(0, 3)) {
+    push({ kind: 'task', task: t }, { likely: true, reasons: ['scheduled that day'] });
+  }
   push({ kind: 'none' }, { likely: true });
   for (const t of report.tasks) push({ kind: 'task', task: t });
-  for (const tg of report.tagVocab) push({ kind: 'tag', tag: tg });
+  for (const tg of report.tagVocab) push({ kind: 'tag', tag: tg }, { count: report.tagCount ? report.tagCount(tg) : 0 });
   return items;
 }
 
@@ -1050,7 +1076,10 @@ function rankLabels(items, query) {
   const hits = [];
   for (const it of items) {
     const m = fuzzy(itemSearchText(it));
-    if (m) hits.push({ it, score: m.score + (it.suggested ? 2 : it.likely ? 1 : 0) });
+    if (m) {
+      const usage = it.count ? Math.min(0.5, Math.log10(1 + it.count) / 4) : 0;
+      hits.push({ it, score: m.score + (it.suggested ? 2 : it.likely ? 1 : 0) + usage });
+    }
   }
   hits.sort((a, b) => b.score - a.score);
   const out = hits.map(h => h.it).slice(0, 30);
@@ -1093,7 +1122,7 @@ class LabelSuggest extends AbstractInputSuggest {
       if (meta.length) top.createSpan({ cls: 'wtl-review-meta', text: '  ' + meta.join('  ') });
     } else if (c.kind === 'tag') {
       top.createSpan({ text: `#${c.tag}` });
-      top.createSpan({ cls: 'wtl-review-meta', text: '  tag only' });
+      top.createSpan({ cls: 'wtl-review-meta', text: it.count ? `  tag only · used ${it.count}×` : '  tag only' });
     } else {
       top.createSpan({ text: 'Not task work' });
     }
