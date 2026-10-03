@@ -755,10 +755,58 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     }));
 
     // Background check: shortly after startup (lets Google events load), then every few hours.
+    this.loadedAt = Date.now();
     this.app.workspace.onLayoutReady(() => {
+      this.watchCalendar();
       this.registerInterval(window.setTimeout(() => this.weeklyCheck(), 60 * 1000));
       this.registerInterval(window.setInterval(() => this.weeklyCheck(), 3 * 60 * 60 * 1000));
     });
+  }
+
+  // ---- Calendar loading ---------------------------------------------------
+
+  /**
+   * Full Calendar loads Google events some time after Obsidian starts (and syncs
+   * them later), and its API has no "loaded" event. So: check a cheap signature of
+   * its events, every 3 s for the first two minutes and every minute after,
+   * and redraw open logs whenever it changes.
+   */
+  watchCalendar() {
+    let ticks = 0;
+    const check = async () => {
+      ticks++;
+      if (ticks > 40 && ticks % 20 !== 0) return; // after ~2 min: once a minute
+      if (!this.settings.token) return;
+      let sig;
+      try {
+        this.silent = true;
+        const events = (await this.calendarApi()).getEvents({}, []);
+        let sum = 0;
+        for (const e of events) sum = (sum + (e.startMillis || 0) % 1e9 + (e.endMillis || 0) % 1e9 + (e.title || '').length) % 1e12;
+        sig = `${events.length}:${sum}`;
+      } catch (e) {
+        return; // Full Calendar not ready yet
+      } finally {
+        this.silent = false;
+      }
+      if (sig === this.calendarSig) return;
+      const first = this.calendarSig === undefined;
+      this.calendarSig = sig;
+      this.calendarChangedAt = Date.now();
+      if (!first) {
+        this.refreshBlocks();
+        this.refreshViews();
+      }
+    };
+    check();
+    this.registerInterval(window.setInterval(check, 3000));
+  }
+
+  /** False while the calendar may still be loading (so an empty week might not be empty). */
+  calendarSettled() {
+    if (Date.now() - (this.loadedAt || 0) > 2 * 60 * 1000) return true;
+    if (!this.calendarSig || this.calendarSig.startsWith('0:')) return false;
+    return Date.now() - this.calendarChangedAt > 6000;
   }
 
   onunload() {
@@ -772,6 +820,10 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const s = this.settings;
     const today = moment().format('YYYY-MM-DD');
     if ((!s.autoExport && !s.remind) || s.lastCheck === today || !s.token) return;
+    if (!this.calendarSettled()) {
+      this.registerInterval(window.setTimeout(() => this.weeklyCheck(), 30 * 1000));
+      return;
+    }
     let report;
     try {
       this.silent = true; // never pop the access dialog from the background
@@ -1893,7 +1945,12 @@ class TimeLogView extends ItemView {
     }
 
     if (!report.blocks.length) {
-      root.createDiv({ cls: 'wtl-muted', text: 'No timed calendar blocks this week. Check the calendars selected in settings.' });
+      root.createDiv({
+        cls: 'wtl-muted',
+        text: this.plugin.calendarSettled()
+          ? 'No timed calendar blocks this week. Check the calendars selected in settings.'
+          : 'Waiting for your calendar to load…',
+      });
       return;
     }
 
@@ -2117,6 +2174,11 @@ class TimeLogBlock extends MarkdownRenderChild {
     const { path } = this.plugin.csvPath(report.start);
 
     const show = (this.opts.show || 'full').toLowerCase();
+    if (!report.blocks.length && !this.plugin.calendarSettled()) {
+      // Full Calendar is still loading (e.g. right after Obsidian starts); we redraw when it's in.
+      el.createDiv({ cls: 'wtl-muted', text: 'Time log: waiting for your calendar to load…' });
+      return;
+    }
     const dim = findDimension(this.plugin.settings, this.opts.group || this.plugin.settings.view);
     if (show === 'hours') return this.renderHours(report, dim);
 
@@ -2161,7 +2223,7 @@ class TimeLogBlock extends MarkdownRenderChild {
         tip: (row, text) => row.setAttr('aria-label', text),
       });
     } else {
-      el.createDiv({ cls: 'wtl-muted', text: 'No calendar blocks this week.' });
+      el.createDiv({ cls: 'wtl-muted', text: this.plugin.calendarSettled() ? 'No calendar blocks this week.' : 'Waiting for your calendar to load…' });
     }
 
     if (show === 'chart') return;
