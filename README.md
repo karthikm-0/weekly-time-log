@@ -11,7 +11,7 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 ## Use
 
 - **Full log**: ribbon clock icon or the command *Open weekly time log*. Week navigation, totals, hours by tag/grouping (expand a group to see its tasks), hours by day, and a table of every block with its label.
-- **Labels**: type any task, or one or more tags (`#postdoc #meeting`), in a block's Label field. Suggestions appear as you type, and new tags are created on the spot. A task label brings in that task's tags.
+- **Labels**: in a block's Label field, pick any mix of tasks and tags; each becomes a chip. Enter on an empty field ("Use: …") saves, Backspace removes the last chip. New tags are created on the spot. Tasks bring in their tags; a block with several tasks splits its hours between them in the Task view and counts once in groupings.
 - **Review**: *Review N* button or the command *Review this week's time blocks*. One block at a time: `1`–`9` choose, `Enter` accept the suggestion, `0` not task work, `/` type any task or tag, `S` skip, `←` back.
 - **Export**: *Export CSV* writes `Time Logs/Time Log YYYY-MM-DD.csv` (one row per block).
 - **In a note**:

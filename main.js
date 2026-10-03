@@ -28,7 +28,7 @@ const DEFAULTS = {
   useTagColors: true,    // reuse colours tags already have (Colored Tags, snippets)
   lastCheck: null,       // ISO date of the last background check
   dataFile: DEFAULT_DATA_FILE,
-  // blockKey -> { kind: 'task'|'tag'|'none', task, taskDesc, taskPath, tags, title, date }
+  // blockKey -> { kind: 'task'|'tag'|'mix'|'none', task, taskDesc, taskPath, tasks, extraTags, tags, title, date }
   // Every confirmed label; also the training data for future suggestions.
   annotations: {},
 };
@@ -216,7 +216,24 @@ function choiceValue(c) {
   if (!c) return '';
   if (c.kind === 'task') return `task:${c.task.key}`;
   if (c.kind === 'tag') return `tag:${c.tags.join(' ')}`;
+  if (c.kind === 'mix') return `mix:${c.tasks.map(t => t.key).join('|')}#${c.tags.join(' ')}`;
   return 'none';
+}
+
+/** Tasks and tags in a label, whatever its kind. */
+function choiceParts(c) {
+  if (!c || c.kind === 'none') return { tasks: [], tags: [] };
+  if (c.kind === 'task') return { tasks: [c.task], tags: [] };
+  if (c.kind === 'tag') return { tasks: [], tags: c.tags };
+  return { tasks: c.tasks, tags: c.tags };
+}
+
+/** The simplest label for a set of tasks and tags: one task, tags only, or a mix. */
+function makeChoice(tasks, tags) {
+  if (!tasks.length && !tags.length) return null;
+  if (tasks.length === 1 && !tags.length) return { kind: 'task', task: tasks[0] };
+  if (!tasks.length) return { kind: 'tag', tags };
+  return { kind: 'mix', tasks, tags };
 }
 
 function hashes(tags) {
@@ -227,6 +244,7 @@ function choiceLabel(c) {
   if (!c) return 'Unattached';
   if (c.kind === 'task') return c.task.desc;
   if (c.kind === 'tag') return `${hashes(c.tags)} (${c.tags.length > 1 ? 'tags' : 'tag'} only)`;
+  if (c.kind === 'mix') return [...c.tasks.map(t => t.desc), ...c.tags.map(t => '#' + t)].join(' + ');
   return 'Not task work';
 }
 
@@ -293,31 +311,40 @@ function findDimension(settings, ref) {
   return dims.find(d => d.id.toLowerCase() === r || d.label.toLowerCase() === r) || dims[0];
 }
 
-function taskLeaf(b) {
-  if (b.task) return { key: b.task.key, label: b.task.desc, task: b.task };
-  if (b.choice && b.choice.kind === 'tag') return { key: choiceValue(b.choice), label: `${hashes(b.choice.tags)} (no specific task)`, muted: true };
-  return { key: b.choice ? '~none' : '~open', label: b.choice ? 'Not task work' : 'Unattached', muted: true };
+/** What a block counts toward in the Task view; several tasks split its hours evenly. */
+function taskLeaves(b) {
+  if (b.tasks && b.tasks.length) return b.tasks.map(t => ({ key: t.key, label: t.desc, task: t, share: 1 / b.tasks.length }));
+  if (b.choice && b.choice.kind === 'tag') {
+    return [{ key: choiceValue(b.choice), label: `${hashes(b.choice.tags)} (no specific task)`, muted: true, share: 1 }];
+  }
+  return [{ key: b.choice ? '~none' : '~open', label: b.choice ? 'Not task work' : 'Unattached', muted: true, share: 1 }];
 }
 
 /** Rows of { label, hours, n, unconfirmed, muted, children } for one dimension. */
 function buildTree(blocks, dim) {
   const top = new Map();
-  const add = (map, g0, b) => {
+  const add = (map, g0, b, h) => {
     if (!map.has(g0.key)) map.set(g0.key, { ...g0, hours: 0, n: 0, unconfirmed: 0, kids: new Map() });
     const g = map.get(g0.key);
-    g.hours += b.hours;
+    g.hours += h;
     g.n++;
-    if (b.status !== 'confirmed') g.unconfirmed += b.hours;
+    if (b.status !== 'confirmed') g.unconfirmed += h;
     return g;
   };
+  const addWithTasks = (g0, b, h) => {
+    const g = add(top, g0, b, h);
+    for (const leaf of taskLeaves(b)) add(g.kids, leaf, b, h * leaf.share);
+  };
   for (const b of blocks) {
-    if (dim.id === 'task') { add(top, taskLeaf(b), b); continue; }
+    if (dim.id === 'task') {
+      for (const leaf of taskLeaves(b)) add(top, leaf, b, b.hours * leaf.share);
+      continue;
+    }
     if (dim.id === 'tag') {
       // Each tag gets the block's full hours, so this view can sum past the total.
       const tags = b.tags.length ? [...new Set(b.tags)] : [null];
       for (const tg of tags) {
-        const g0 = tg ? { key: tg, label: `#${tg}` } : { key: '~', label: 'Untagged', muted: true };
-        add(add(top, g0, b).kids, taskLeaf(b), b);
+        addWithTasks(tg ? { key: tg, label: `#${tg}` } : { key: '~', label: 'Untagged', muted: true }, b, b.hours);
       }
       continue;
     }
@@ -328,7 +355,7 @@ function buildTree(blocks, dim) {
       const v = tagValue(b.tags, dim.group);
       g0 = v ? { key: v, label: v } : { key: '~', label: `No ${dim.label.toLowerCase()}`, muted: true };
     }
-    add(add(top, g0, b).kids, taskLeaf(b), b);
+    addWithTasks(g0, b, b.hours);
   }
   const order = (a, b) => (a.muted ? 1 : 0) - (b.muted ? 1 : 0) || b.hours - a.hours;
   return [...top.values()].sort(order).map(r => ({ ...r, children: [...r.kids.values()].sort(order) }));
@@ -487,10 +514,7 @@ function blockCategories(b, dim) {
     return tags.map(t => ({ key: t, label: `#${t}`, share: 1 / tags.length }));
   }
   if (dim.id === 'calendar') return [{ key: b.calendarId, label: b.calendar, share: 1 }];
-  if (dim.id === 'task') {
-    const leaf = taskLeaf(b);
-    return [{ key: leaf.key, label: leaf.label, share: 1 }];
-  }
+  if (dim.id === 'task') return taskLeaves(b).map(l => ({ key: l.key, label: l.label, share: l.share }));
   const v = tagValue(b.tags, dim.group);
   return [v ? { key: v, label: v, share: 1 } : { key: '~', label: `No ${dim.label.toLowerCase()}`, share: 1 }];
 }
@@ -1100,6 +1124,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       v.n++;
       if (a.kind === 'none') v.none += sim;
       if (a.kind === 'task') bump(v.task, a.task, sim);
+      if (a.kind === 'mix') for (const t of a.tasks || []) bump(v.task, t.key, sim);
       for (const tg of a.tags || []) bump(v.tag, tg, sim);
     }
     return v;
@@ -1252,10 +1277,12 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       const a = this.settings.annotations[b.key];
       if (a) {
         b.status = 'confirmed';
+        // A task may have moved or been deleted since; keep the label anyway.
+        const resolve = (key, desc, path, tags) => byKey.get(key) || { key, desc: desc || key, path, tags: tags || [], ghost: true };
         if (a.kind === 'task') {
-          // The task may have moved or been deleted since; keep the label anyway.
-          const task = byKey.get(a.task) || { key: a.task, desc: a.taskDesc || a.task, path: a.taskPath, tags: a.tags || [], ghost: true };
-          b.choice = { kind: 'task', task };
+          b.choice = { kind: 'task', task: resolve(a.task, a.taskDesc, a.taskPath, a.tags) };
+        } else if (a.kind === 'mix') {
+          b.choice = { kind: 'mix', tasks: (a.tasks || []).map(t => resolve(t.key, t.desc, t.path, t.tags)), tags: a.extraTags || [] };
         } else if (a.kind === 'tag') {
           b.choice = { kind: 'tag', tags: a.tags || [] };
         } else {
@@ -1268,8 +1295,10 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         b.status = 'open';
         b.choice = null;
       }
-      b.task = b.choice && b.choice.kind === 'task' ? b.choice.task : null;
-      b.tags = b.task ? b.task.tags : b.choice && b.choice.kind === 'tag' ? b.choice.tags : [];
+      const parts = choiceParts(b.choice);
+      b.tasks = parts.tasks;
+      b.task = parts.tasks[0] || null;
+      b.tags = [...new Set([...parts.tasks.flatMap(t => t.tags), ...parts.tags])];
     }
     return report;
   }
@@ -1283,12 +1312,16 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     if (!choice) {
       delete this.settings.annotations[block.key];
     } else {
+      const parts = choiceParts(choice);
       this.settings.annotations[block.key] = {
         kind: choice.kind,
         task: choice.kind === 'task' ? choice.task.key : undefined,
         taskDesc: choice.kind === 'task' ? choice.task.desc : undefined,
         taskPath: choice.kind === 'task' ? choice.task.path : undefined,
-        tags: choice.kind === 'task' ? choice.task.tags : choice.kind === 'tag' ? choice.tags : [],
+        tasks: choice.kind === 'mix' ? parts.tasks.map(t => ({ key: t.key, desc: t.desc, path: t.path, tags: t.tags })) : undefined,
+        extraTags: choice.kind === 'mix' ? parts.tags : undefined,
+        // All tags involved, for learning and grouping.
+        tags: [...new Set([...parts.tasks.flatMap(t => t.tags), ...parts.tags])],
         title: block.title,
         date: block.date,
       };
@@ -1427,13 +1460,15 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       'label', 'task', 'task_file', 'tags', ...groups.map(g => g.name.toLowerCase()),
       'task_scheduled', 'task_due', 'task_done', 'status', 'confidence', 'why'];
     const rows = report.blocks.map(b => {
-      const t = b.task;
+      // Several tasks: '; '-separated, in the same order in every task_* column.
+      const ts = b.tasks || [];
+      const col = f => (ts.some(t => f(t)) ? ts.map(f).join('; ') : '');
       return [
         report.start.format('YYYY-MM-DD'), b.date, b.start.format('ddd'),
         b.start.format('HH:mm'), b.end.format('HH:mm'), b.hours.toFixed(2), b.title, b.calendar,
-        b.choice ? b.choice.kind : '', t ? t.desc : '', t ? t.path || '' : '', b.tags.map(x => '#' + x).join(' '),
+        b.choice ? b.choice.kind : '', col(t => t.desc), col(t => t.path || ''), b.tags.map(x => '#' + x).join(' '),
         ...groups.map(g => tagValue(b.tags, g) || ''),
-        t ? t.scheduled || '' : '', t ? t.due || '' : '', t ? (t.done ? 'yes' : 'no') : '',
+        col(t => t.scheduled || ''), col(t => t.due || ''), col(t => (t.done ? 'yes' : 'no')),
         b.status,
         b.status === 'suggested' && b.choice.score != null ? Math.min(1, b.choice.score).toFixed(2) : '',
         b.status === 'suggested' ? (b.choice.reasons || []).join('; ') : '',
@@ -1508,23 +1543,24 @@ function normalizeTag(text) {
 }
 
 /**
- * Pure ranking, separate from the UI so it is easy to test.
- * "#postdoc #mee" keeps the finished tags (#postdoc) and completes the last word,
- * so a block can get several tags.
+ * Pure ranking, separate from the UI so it is easy to test. `picked` holds the
+ * chips already in the field: they're left out, and "Use …" saves them.
  */
-function rankLabels(items, query) {
-  const m = query.match(/^((?:#\S+\s+)+)(.*)$/);
-  const prefix = m ? [...new Set(m[1].trim().split(/\s+/).map(normalizeTag).filter(Boolean))] : [];
-  const q = (m ? m[2] : query).trim();
-  const has = tg => prefix.some(p => p.toLowerCase() === tg.toLowerCase());
-  const withPrefix = it => (prefix.length ? { ...it, choice: { kind: 'tag', tags: [...prefix, ...it.choice.tags] }, adds: it.choice.tags } : it);
-  const pool = prefix.length
-    ? items.filter(i => i.choice.kind === 'tag' && i.choice.tags.length === 1 && !has(i.choice.tags[0]))
-    : items;
+function rankLabels(items, query, picked = { tasks: [], tags: [] }) {
+  const q = query.trim();
+  const pickedTasks = new Set(picked.tasks.map(t => t.key));
+  const pickedTags = new Set(picked.tags.map(t => t.toLowerCase()));
+  const any = picked.tasks.length + picked.tags.length > 0;
+  const pool = items.filter(i => {
+    const c = i.choice;
+    if (c.kind === 'task') return !pickedTasks.has(c.task.key);
+    if (c.kind === 'tag') return c.tags.length === 1 ? !pickedTags.has(c.tags[0].toLowerCase()) : !any;
+    return !any; // "not task work" and multi-part suggestions only on an empty field
+  });
 
   let out;
   if (!q) {
-    out = pool.filter(i => i.suggested || i.likely).map(withPrefix);
+    out = pool.filter(i => i.suggested || i.likely);
   } else {
     const fuzzy = prepareFuzzySearch(q.replace(/^#/, ''));
     const hits = [];
@@ -1536,58 +1572,129 @@ function rankLabels(items, query) {
       }
     }
     hits.sort((a, b) => b.score - a.score);
-    out = hits.map(h => withPrefix(h.it)).slice(0, 30);
+    out = hits.map(h => h.it).slice(0, 30);
     const tag = normalizeTag(q);
     const exists = items.some(i => i.choice.kind === 'tag' && i.choice.tags.length === 1 && i.choice.tags[0].toLowerCase() === tag.toLowerCase());
-    if (tag && !exists && !has(tag)) {
-      const create = { choice: { kind: 'tag', tags: [...prefix, tag] }, create: true, adds: [tag] };
+    if (tag && !exists && !pickedTags.has(tag.toLowerCase())) {
+      const create = { choice: { kind: 'tag', tags: [tag] }, create: true };
       // A leading "#" means "this is a tag": offer creating it first, unless an existing tag matches.
       const tagHit = out.some(i => i.choice.kind === 'tag');
       if (!out.length || (q.startsWith('#') && !tagHit)) out.unshift(create); else out.push(create);
     }
   }
-  // With tags already typed, offer to use exactly those: first when nothing more is
-  // being typed (Enter saves), last while completing another tag.
-  if (prefix.length) {
-    const use = { choice: { kind: 'tag', tags: prefix }, commit: true };
+  // Save what's picked: first when nothing is being typed (Enter saves), last otherwise.
+  if (any) {
+    const use = { choice: makeChoice(picked.tasks, picked.tags), commit: true };
     if (q) out.push(use); else out.unshift(use);
   }
   return out;
 }
 
-class LabelSuggest extends AbstractInputSuggest {
-  constructor(app, inputEl, items, onPick) {
-    super(app, inputEl);
-    this.input = inputEl;
+/**
+ * Label field: tasks and tags you pick become chips; nothing is saved until
+ * "Use …" (Enter on an empty field). Backspace removes the last chip.
+ * `replaceable`: the starting chips are only a suggestion, so the first pick replaces them.
+ */
+class LabelPicker {
+  constructor(app, parent, items, initial, onCommit, { placeholder = 'Add a task or #tag…', replaceable = false } = {}) {
     this.items = items;
-    this.onPick = onPick;
+    this.initial = initial;
+    this.onCommit = onCommit;
+    this.replaceable = replaceable;
+    this.el = parent.createDiv({ cls: 'wtl-picker' });
+    this.chipsEl = this.el.createSpan({ cls: 'wtl-chips' });
+    this.input = this.el.createEl('input', { type: 'text', cls: 'wtl-picker-input', attr: { placeholder, spellcheck: 'false' } });
+    this.reset();
+    this.suggest = new LabelSuggest(app, this.input, this);
+    this.input.addEventListener('keydown', e => {
+      if (e.key === 'Backspace' && !this.input.value && (this.tasks.length || this.tags.length)) {
+        e.preventDefault();
+        if (this.tags.length) this.tags.pop(); else this.tasks.pop();
+        this.untouched = false;
+        this.changed();
+      }
+    });
+    this.el.addEventListener('click', () => this.input.focus());
+  }
+
+  reset() {
+    const p = choiceParts(this.initial);
+    this.tasks = [...p.tasks];
+    this.tags = [...p.tags];
+    this.untouched = true;
+    this.renderChips();
+  }
+
+  renderChips() {
+    this.chipsEl.empty();
+    this.el.toggleClass('is-pending', this.replaceable && this.untouched && !!(this.tasks.length || this.tags.length));
+    const chip = (text, cls, onRemove) => {
+      const c = this.chipsEl.createSpan({ cls: `wtl-chip ${cls}` });
+      c.createSpan({ text });
+      const x = c.createSpan({ cls: 'wtl-chip-x', text: '×' });
+      x.setAttr('aria-label', 'Remove');
+      x.onclick = e => { e.stopPropagation(); onRemove(); this.untouched = false; this.changed(); };
+    };
+    for (const t of this.tasks) chip(t.desc, 'is-task', () => { this.tasks = this.tasks.filter(x => x !== t); });
+    for (const tg of this.tags) chip(`#${tg}`, 'is-tag', () => { this.tags = this.tags.filter(x => x !== tg); });
+  }
+
+  changed() {
+    this.renderChips();
+    this.input.focus();
+    this.input.dispatchEvent(new Event('input'));
+  }
+
+  add(choice) {
+    if (this.replaceable && this.untouched) { this.tasks = []; this.tags = []; }
+    this.untouched = false;
+    const p = choiceParts(choice);
+    for (const t of p.tasks) if (!this.tasks.some(x => x.key === t.key)) this.tasks.push(t);
+    for (const tg of p.tags) if (!this.tags.some(x => x.toLowerCase() === tg.toLowerCase())) this.tags.push(tg);
+    this.input.value = '';
+    this.changed();
+  }
+
+  commit(choice) {
+    this.suggest.close();
+    this.onCommit(choice);
+  }
+}
+
+class LabelSuggest extends AbstractInputSuggest {
+  constructor(app, inputEl, picker) {
+    super(app, inputEl);
+    this.picker = picker;
     this.limit = 40;
-    // Show this block's suggestions as soon as the field is focused.
+    // Show suggestions as soon as the field is focused.
     inputEl.addEventListener('focus', () => inputEl.dispatchEvent(new Event('input')));
   }
 
   getSuggestions(query) {
-    return rankLabels(this.items, query);
+    const p = this.picker;
+    // Untouched suggestion chips are about to be replaced, so don't treat them as picked.
+    const picked = p.replaceable && p.untouched ? { tasks: [], tags: [] } : { tasks: p.tasks, tags: p.tags };
+    return rankLabels(p.items, query, picked);
   }
 
   renderSuggestion(it, el) {
     el.addClass('wtl-suggest-item');
     const top = el.createDiv({ cls: 'wtl-suggest-top' });
     const c = it.choice;
-    const kept = it.adds ? c.tags.filter(t => !it.adds.includes(t)) : [];
     if (it.commit) {
-      top.createSpan({ text: `Use ${hashes(c.tags)}` });
+      top.createSpan({ cls: 'wtl-suggest-use', text: `Use: ${choiceLabel(c)}` });
+      top.createSpan({ cls: 'wtl-review-meta', text: '  Enter' });
     } else if (it.create) {
-      top.createSpan({ text: `${kept.length ? hashes(kept) + ' + ' : ''}create #${it.adds[0]}` });
+      top.createSpan({ text: `Create #${c.tags[0]}` });
     } else if (c.kind === 'task') {
       top.createSpan({ text: c.task.desc });
       const meta = [];
-      if (c.task.tags.length) meta.push(c.task.tags.map(t => '#' + t).join(' '));
+      if (c.task.tags.length) meta.push(hashes(c.task.tags));
       if (c.task.scheduled) meta.push(`⏳ ${c.task.scheduled}`);
       if (meta.length) top.createSpan({ cls: 'wtl-review-meta', text: '  ' + meta.join('  ') });
     } else if (c.kind === 'tag') {
-      top.createSpan({ text: kept.length ? `${hashes(kept)} + ${hashes(it.adds)}` : hashes(c.tags) });
-      top.createSpan({ cls: 'wtl-review-meta', text: it.count ? `  used ${it.count}×` : '' });
+      top.createSpan({ text: hashes(c.tags) });
+      if (it.count) top.createSpan({ cls: 'wtl-review-meta', text: `  used ${it.count}×` });
     } else {
       top.createSpan({ text: 'Not task work' });
     }
@@ -1596,15 +1703,10 @@ class LabelSuggest extends AbstractInputSuggest {
   }
 
   selectSuggestion(it) {
-    if (it.choice.kind === 'tag' && !it.commit) {
-      // Tags stack: put them in the field and keep going. "Use …" (listed first) saves.
-      this.input.value = hashes(it.choice.tags) + ' ';
-      this.input.focus();
-      this.input.dispatchEvent(new Event('input'));
-      return;
-    }
-    this.close();
-    this.onPick(it.choice);
+    if (it.commit) return this.picker.commit(it.choice);
+    if (it.choice.kind === 'none') return this.picker.commit(it.choice);
+    // Tasks and tags stack as chips; "Use …" saves.
+    this.picker.add(it.choice);
   }
 }
 
@@ -1816,23 +1918,15 @@ class TimeLogView extends ItemView {
       tr.createEl('td', { text: fmtHours(b.hours), cls: 'wtl-num' });
 
       const cell = tr.createEl('td', { cls: 'wtl-label-cell' });
-      const current = b.choice ? choiceLabel(b.choice) : '';
-      const input = cell.createEl('input', {
-        type: 'text',
-        cls: 'wtl-label-input' + (b.status === 'confirmed' ? '' : ' is-pending'),
-        value: current,
-        attr: { placeholder: 'Type a task or #tags…', spellcheck: 'false' },
-      });
-      // On focus: tag labels stay so you can add another ("#postdoc " + "#meeting");
-      // task labels clear so suggestions show. Restored if nothing was picked.
-      const isTags = b.choice && b.choice.kind === 'tag';
-      input.addEventListener('focus', () => { input.value = isTags ? hashes(b.choice.tags) + ' ' : ''; }, true);
-      input.addEventListener('blur', () => { window.setTimeout(() => { if (document.activeElement !== input) input.value = current; }, 200); });
-      new LabelSuggest(this.app, input, labelItems(report, b), async choice => {
+      const picker = new LabelPicker(this.app, cell, labelItems(report, b), b.choice, async choice => {
         await this.plugin.annotate(report, b, choice);
         this.rerender();
         this.scheduleSave();
-      });
+      }, { placeholder: b.choice ? '' : 'Add a task or #tag…', replaceable: b.status !== 'confirmed' });
+      // Leaving the field without saving puts the label back.
+      picker.input.addEventListener('blur', () => window.setTimeout(() => {
+        if (!picker.el.contains(document.activeElement)) { picker.input.value = ''; picker.reset(); }
+      }, 300));
       if (b.status === 'confirmed' && b.suggestion && choiceValue(b.suggestion) !== choiceValue(b.choice)) {
         const reset = cell.createEl('button', { cls: 'wtl-accept clickable-icon', text: '↺' });
         reset.setAttr('aria-label', `Forget my label (suggestion: ${choiceLabel(b.suggestion)})`);
@@ -2159,15 +2253,13 @@ class ReviewModal extends Modal {
 
     const typed = list.createDiv({ cls: 'wtl-review-option wtl-review-type' });
     typed.createSpan({ cls: 'wtl-key', text: '/' });
-    this.input = typed.createEl('input', {
-      type: 'text',
-      cls: 'wtl-label-input',
-      attr: { placeholder: 'Type a task, or #tags: Enter adds each tag, then Enter on "Use …" saves', spellcheck: 'false' },
+    const picker = new LabelPicker(this.app, typed, labelItems(this.report, b), null, choice => this.choose(choice), {
+      placeholder: 'Add tasks and #tags; Enter on an empty field saves',
     });
-    new LabelSuggest(this.app, this.input, labelItems(this.report, b), choice => this.choose(choice));
+    this.input = picker.input;
 
     const foot = el.createDiv({ cls: 'wtl-review-foot' });
-    foot.createDiv({ cls: 'wtl-muted', text: '1–9 choose · Enter accept suggestion · 0 not task work · / type (tags stack until "Use …") · S skip · ← back' });
+    foot.createDiv({ cls: 'wtl-muted', text: '1–9 choose · Enter accept suggestion · 0 not task work · / add tasks & tags (Enter on empty saves) · S skip · ← back' });
     const btns = foot.createDiv({ cls: 'wtl-review-buttons' });
     if (this.i > 0) btns.createEl('button', { text: 'Back' }).onclick = () => this.prev();
     btns.createEl('button', { text: 'Skip' }).onclick = () => this.next();

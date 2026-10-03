@@ -270,3 +270,26 @@ body.theme-dark {
 
 /* Hidden probe used to read tag colours */
 .wtl-probe { position: absolute; left: -9999px; top: 0; visibility: hidden; pointer-events: none; }
+
+/* Label picker: chips + input */
+.wtl-picker {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  min-height: 30px; padding: 2px 6px; width: 100%; max-width: 380px;
+  border: 1px solid var(--background-modifier-border); border-radius: 6px;
+  background: var(--background-primary); cursor: text;
+}
+.wtl-picker:focus-within { border-color: var(--interactive-accent); }
+.wtl-chips { display: contents; }
+.wtl-chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  padding: 1px 4px 1px 8px; border-radius: 10px; font-size: var(--font-ui-smaller);
+  background: var(--background-modifier-hover); color: var(--text-normal);
+}
+.wtl-chip > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wtl-chip.is-tag { color: var(--text-accent); }
+.wtl-chip-x { color: var(--text-faint); cursor: pointer; padding: 0 3px; }
+.wtl-chip-x:hover { color: var(--text-normal); }
+.wtl-picker.is-pending .wtl-chip { font-style: italic; color: var(--text-muted); border: 1px dashed var(--background-modifier-border); }
+.wtl-picker-input { flex: 1; min-width: 80px; border: none !important; box-shadow: none !important; background: transparent !important; padding: 2px; height: 24px; }
+.wtl-review-type .wtl-picker { max-width: none; flex: 1; }
+.wtl-suggest-use { font-weight: 600; }
