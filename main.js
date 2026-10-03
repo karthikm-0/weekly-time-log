@@ -214,14 +214,18 @@ function plural(n, word) {
 function choiceValue(c) {
   if (!c) return '';
   if (c.kind === 'task') return `task:${c.task.key}`;
-  if (c.kind === 'tag') return `tag:${c.tag}`;
+  if (c.kind === 'tag') return `tag:${c.tags.join(' ')}`;
   return 'none';
+}
+
+function hashes(tags) {
+  return tags.map(t => '#' + t).join(' ');
 }
 
 function choiceLabel(c) {
   if (!c) return 'Unattached';
   if (c.kind === 'task') return c.task.desc;
-  if (c.kind === 'tag') return `#${c.tag} (tag only)`;
+  if (c.kind === 'tag') return `${hashes(c.tags)} (${c.tags.length > 1 ? 'tags' : 'tag'} only)`;
   return 'Not task work';
 }
 
@@ -290,7 +294,7 @@ function findDimension(settings, ref) {
 
 function taskLeaf(b) {
   if (b.task) return { key: b.task.key, label: b.task.desc, task: b.task };
-  if (b.choice && b.choice.kind === 'tag') return { key: `tag:${b.choice.tag}`, label: `#${b.choice.tag} (no specific task)`, muted: true };
+  if (b.choice && b.choice.kind === 'tag') return { key: choiceValue(b.choice), label: `${hashes(b.choice.tags)} (no specific task)`, muted: true };
   return { key: b.choice ? '~none' : '~open', label: b.choice ? 'Not task work' : 'Unattached', muted: true };
 }
 
@@ -307,10 +311,17 @@ function buildTree(blocks, dim) {
   };
   for (const b of blocks) {
     if (dim.id === 'task') { add(top, taskLeaf(b), b); continue; }
-    let g0;
     if (dim.id === 'tag') {
-      g0 = b.tags[0] ? { key: b.tags[0], label: `#${b.tags[0]}` } : { key: '~', label: 'Untagged', muted: true };
-    } else if (dim.id === 'calendar') {
+      // Each tag gets the block's full hours, so this view can sum past the total.
+      const tags = b.tags.length ? [...new Set(b.tags)] : [null];
+      for (const tg of tags) {
+        const g0 = tg ? { key: tg, label: `#${tg}` } : { key: '~', label: 'Untagged', muted: true };
+        add(add(top, g0, b).kids, taskLeaf(b), b);
+      }
+      continue;
+    }
+    let g0;
+    if (dim.id === 'calendar') {
       g0 = { key: b.calendarId, label: b.calendar };
     } else {
       const v = tagValue(b.tags, dim.group);
@@ -909,7 +920,12 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       } else if (best && best.score >= this.settings.minScore) {
         suggestion = { kind: 'task', task: best.task, score: best.score, reasons: best.reasons };
       } else if (tagRank[0] && tagRank[0].p >= TAG_ONLY_MIN) {
-        suggestion = { kind: 'tag', tag: tagRank[0].tag, score: tagRank[0].p, reasons: [tagRank[0].why] };
+        const sure = tagRank.filter(t => t.p >= TAG_ONLY_MIN);
+        const tags = sure.map(t => t.tag)
+          .filter(tg => !sure.some(o => o.tag.toLowerCase().startsWith(tg.toLowerCase() + '/')))
+          .slice(0, 3);
+        const why = [...new Set(sure.filter(t => tags.includes(t.tag)).map(t => t.why))];
+        suggestion = { kind: 'tag', tags, score: tagRank[0].p, reasons: why };
       }
 
       b.candidates = candidates;
@@ -930,7 +946,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
           const task = byKey.get(a.task) || { key: a.task, desc: a.taskDesc || a.task, path: a.taskPath, tags: a.tags || [], ghost: true };
           b.choice = { kind: 'task', task };
         } else if (a.kind === 'tag') {
-          b.choice = { kind: 'tag', tag: (a.tags || [])[0] };
+          b.choice = { kind: 'tag', tags: a.tags || [] };
         } else {
           b.choice = { kind: 'none' };
         }
@@ -942,7 +958,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         b.choice = null;
       }
       b.task = b.choice && b.choice.kind === 'task' ? b.choice.task : null;
-      b.tags = b.task ? b.task.tags : b.choice && b.choice.kind === 'tag' ? [b.choice.tag] : [];
+      b.tags = b.task ? b.task.tags : b.choice && b.choice.kind === 'tag' ? b.choice.tags : [];
     }
     return report;
   }
@@ -961,7 +977,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         task: choice.kind === 'task' ? choice.task.key : undefined,
         taskDesc: choice.kind === 'task' ? choice.task.desc : undefined,
         taskPath: choice.kind === 'task' ? choice.task.path : undefined,
-        tags: choice.kind === 'task' ? choice.task.tags : choice.kind === 'tag' ? [choice.tag] : [],
+        tags: choice.kind === 'task' ? choice.task.tags : choice.kind === 'tag' ? choice.tags : [],
         title: block.title,
         date: block.date,
       };
@@ -1045,21 +1061,21 @@ function labelItems(report, b) {
   };
   if (b.suggestion) push(b.suggestion, { suggested: true, reasons: b.suggestion.reasons });
   for (const c of b.candidates.slice(0, 5)) push({ kind: 'task', task: c.task }, { likely: true, reasons: c.reasons });
-  for (const t of b.tagRank.slice(0, 3)) push({ kind: 'tag', tag: t.tag }, { likely: true, reasons: [t.why] });
+  for (const t of b.tagRank.slice(0, 3)) push({ kind: 'tag', tags: [t.tag] }, { likely: true, reasons: [t.why] });
   // Tasks planned for that day are likely even when the title doesn't match.
   for (const t of report.tasks.filter(t => t.scheduled === b.date).slice(0, 3)) {
     push({ kind: 'task', task: t }, { likely: true, reasons: ['scheduled that day'] });
   }
   push({ kind: 'none' }, { likely: true });
   for (const t of report.tasks) push({ kind: 'task', task: t });
-  for (const tg of report.tagVocab) push({ kind: 'tag', tag: tg }, { count: report.tagCount ? report.tagCount(tg) : 0 });
+  for (const tg of report.tagVocab) push({ kind: 'tag', tags: [tg] }, { count: report.tagCount ? report.tagCount(tg) : 0 });
   return items;
 }
 
 function itemSearchText(it) {
   const c = it.choice;
   if (c.kind === 'task') return `${c.task.desc} ${c.task.tags.map(t => '#' + t).join(' ')}`;
-  if (c.kind === 'tag') return `#${c.tag}`;
+  if (c.kind === 'tag') return hashes(c.tags);
   return 'Not task work';
 }
 
@@ -1068,29 +1084,47 @@ function normalizeTag(text) {
   return text.trim().replace(/^#+/, '').replace(/\s+/g, '_').replace(/[^\p{L}\p{N}_/-]/gu, '');
 }
 
-/** Pure ranking, separate from the UI so it is easy to test. */
+/**
+ * Pure ranking, separate from the UI so it is easy to test.
+ * "#postdoc #mee" keeps the finished tags (#postdoc) and completes the last word,
+ * so a block can get several tags.
+ */
 function rankLabels(items, query) {
-  const q = query.trim();
-  if (!q) return items.filter(i => i.suggested || i.likely);
-  const fuzzy = prepareFuzzySearch(q.replace(/^#/, ''));
-  const hits = [];
-  for (const it of items) {
-    const m = fuzzy(itemSearchText(it));
-    if (m) {
-      const usage = it.count ? Math.min(0.5, Math.log10(1 + it.count) / 4) : 0;
-      hits.push({ it, score: m.score + (it.suggested ? 2 : it.likely ? 1 : 0) + usage });
+  const m = query.match(/^((?:#\S+\s+)+)(.*)$/);
+  const prefix = m ? [...new Set(m[1].trim().split(/\s+/).map(normalizeTag).filter(Boolean))] : [];
+  const q = (m ? m[2] : query).trim();
+  const has = tg => prefix.some(p => p.toLowerCase() === tg.toLowerCase());
+  const withPrefix = it => (prefix.length ? { ...it, choice: { kind: 'tag', tags: [...prefix, ...it.choice.tags] }, adds: it.choice.tags } : it);
+  const pool = prefix.length
+    ? items.filter(i => i.choice.kind === 'tag' && i.choice.tags.length === 1 && !has(i.choice.tags[0]))
+    : items;
+
+  let out;
+  if (!q) {
+    out = pool.filter(i => i.suggested || i.likely).map(withPrefix);
+  } else {
+    const fuzzy = prepareFuzzySearch(q.replace(/^#/, ''));
+    const hits = [];
+    for (const it of pool) {
+      const f = fuzzy(itemSearchText(it));
+      if (f) {
+        const usage = it.count ? Math.min(0.5, Math.log10(1 + it.count) / 4) : 0;
+        hits.push({ it, score: f.score + (it.suggested ? 2 : it.likely ? 1 : 0) + usage });
+      }
+    }
+    hits.sort((a, b) => b.score - a.score);
+    out = hits.map(h => withPrefix(h.it)).slice(0, 30);
+    const tag = normalizeTag(q);
+    const exists = items.some(i => i.choice.kind === 'tag' && i.choice.tags.length === 1 && i.choice.tags[0].toLowerCase() === tag.toLowerCase());
+    if (tag && !exists && !has(tag)) {
+      const create = { choice: { kind: 'tag', tags: [...prefix, tag] }, create: true, adds: [tag] };
+      // A leading "#" means "this is a tag": offer creating it first, unless an existing tag matches.
+      const tagHit = out.some(i => i.choice.kind === 'tag');
+      if (!out.length || (q.startsWith('#') && !tagHit)) out.unshift(create); else out.push(create);
     }
   }
-  hits.sort((a, b) => b.score - a.score);
-  const out = hits.map(h => h.it).slice(0, 30);
-  const tag = normalizeTag(q);
-  const exists = items.some(i => i.choice.kind === 'tag' && i.choice.tag.toLowerCase() === tag.toLowerCase());
-  if (tag && !exists) {
-    const create = { choice: { kind: 'tag', tag }, create: true };
-    // A leading "#" means "this is a tag": offer creating it first, unless an existing tag matches.
-    const tagHit = out.some(i => i.choice.kind === 'tag');
-    if (!out.length || (q.startsWith('#') && !tagHit)) out.unshift(create); else out.push(create);
-  }
+  // With tags already typed, offer to use exactly those.
+  if (prefix.length) out.unshift({ choice: { kind: 'tag', tags: prefix }, commit: true });
   return out;
 }
 
@@ -1112,8 +1146,11 @@ class LabelSuggest extends AbstractInputSuggest {
     el.addClass('wtl-suggest-item');
     const top = el.createDiv({ cls: 'wtl-suggest-top' });
     const c = it.choice;
-    if (it.create) {
-      top.createSpan({ text: `Create tag #${c.tag}` });
+    const kept = it.adds ? c.tags.filter(t => !it.adds.includes(t)) : [];
+    if (it.commit) {
+      top.createSpan({ text: `Use ${hashes(c.tags)}` });
+    } else if (it.create) {
+      top.createSpan({ text: `${kept.length ? hashes(kept) + ' + ' : ''}create #${it.adds[0]}` });
     } else if (c.kind === 'task') {
       top.createSpan({ text: c.task.desc });
       const meta = [];
@@ -1121,8 +1158,8 @@ class LabelSuggest extends AbstractInputSuggest {
       if (c.task.scheduled) meta.push(`⏳ ${c.task.scheduled}`);
       if (meta.length) top.createSpan({ cls: 'wtl-review-meta', text: '  ' + meta.join('  ') });
     } else if (c.kind === 'tag') {
-      top.createSpan({ text: `#${c.tag}` });
-      top.createSpan({ cls: 'wtl-review-meta', text: it.count ? `  tag only · used ${it.count}×` : '  tag only' });
+      top.createSpan({ text: kept.length ? `${hashes(kept)} + ${hashes(it.adds)}` : hashes(c.tags) });
+      top.createSpan({ cls: 'wtl-review-meta', text: it.count ? `  used ${it.count}×` : '' });
     } else {
       top.createSpan({ text: 'Not task work' });
     }
@@ -1286,6 +1323,10 @@ class TimeLogView extends ItemView {
         this.rerender();
       };
     }
+    if (dim.id === 'tag' && report.blocks.some(b => b.tags.length > 1)) {
+      const total = report.blocks.reduce((a, b) => a + b.hours, 0);
+      card.createDiv({ cls: 'wtl-muted', text: `Blocks with several tags count under each tag, so this view adds up to more than the ${fmtHours(total)} h total.` });
+    }
     if (!parseTagGroups(this.plugin.settings.tagGroups).length) {
       card.createDiv({ cls: 'wtl-muted', text: 'Tip: define groupings like Project or Role in settings to roll tags up.' });
     }
@@ -1356,11 +1397,13 @@ class TimeLogView extends ItemView {
         type: 'text',
         cls: 'wtl-label-input' + (b.status === 'confirmed' ? '' : ' is-pending'),
         value: current,
-        attr: { placeholder: 'Type a task or #tag…', spellcheck: 'false' },
+        attr: { placeholder: 'Type a task or #tags…', spellcheck: 'false' },
       });
-      // Clear on focus so suggestions show; put the label back if nothing was picked.
-      input.addEventListener('focus', () => { input.value = ''; }, true);
-      input.addEventListener('blur', () => { window.setTimeout(() => { if (!input.value) input.value = current; }, 200); });
+      // On focus: tag labels stay so you can add another ("#postdoc " + "#meeting");
+      // task labels clear so suggestions show. Restored if nothing was picked.
+      const isTags = b.choice && b.choice.kind === 'tag';
+      input.addEventListener('focus', () => { input.value = isTags ? hashes(b.choice.tags) + ' ' : ''; }, true);
+      input.addEventListener('blur', () => { window.setTimeout(() => { if (document.activeElement !== input) input.value = current; }, 200); });
       new LabelSuggest(this.app, input, labelItems(report, b), async choice => {
         await this.plugin.annotate(report, b, choice);
         this.rerender();
@@ -1634,7 +1677,7 @@ class ReviewModal extends Modal {
     };
     if (b.suggestion && b.suggestion.kind !== 'none') add(b.suggestion, b.suggestion.reasons, true);
     for (const c of b.candidates.slice(0, 4)) add({ kind: 'task', task: c.task }, c.reasons);
-    for (const t of b.tagRank.slice(0, 2)) if (t.p >= 0.3) add({ kind: 'tag', tag: t.tag }, [t.why]);
+    for (const t of b.tagRank.slice(0, 2)) if (t.p >= 0.3) add({ kind: 'tag', tags: [t.tag] }, [t.why]);
     this.choices = choices;
 
     const list = el.createDiv({ cls: 'wtl-review-options' });
@@ -1650,8 +1693,8 @@ class ReviewModal extends Modal {
         if (c.choice.task.scheduled) meta.push(`⏳ ${c.choice.task.scheduled}`);
         if (meta.length) name.createSpan({ cls: 'wtl-review-meta', text: '  ' + meta.join('  ') });
       } else {
-        name.setText(`#${c.choice.tag}`);
-        name.createSpan({ cls: 'wtl-review-meta', text: '  tag only, no specific task' });
+        name.setText(hashes(c.choice.tags));
+        name.createSpan({ cls: 'wtl-review-meta', text: '  no specific task' });
       }
       if (c.reasons && c.reasons.length) main.createDiv({ cls: 'wtl-review-why', text: c.reasons.join(' · ') });
       if (c.suggested) row.createSpan({ cls: 'wtl-badge wtl-badge-suggested', text: 'suggested' });
@@ -1675,7 +1718,7 @@ class ReviewModal extends Modal {
     this.input = typed.createEl('input', {
       type: 'text',
       cls: 'wtl-label-input',
-      attr: { placeholder: 'Type any task or #tag (new tags are fine)…', spellcheck: 'false' },
+      attr: { placeholder: 'Type a task, or #tags (several: #postdoc #meeting)…', spellcheck: 'false' },
     });
     new LabelSuggest(this.app, this.input, labelItems(this.report, b), choice => this.choose(choice));
 

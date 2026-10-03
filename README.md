@@ -11,7 +11,7 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 ## Use
 
 - **Full log**: ribbon clock icon or the command *Open weekly time log*. Week navigation, totals, hours by tag/grouping (expand a group to see its tasks), hours by day, and a table of every block with its label.
-- **Labels**: type any task or `#tag` in a block's Label field; suggestions appear as you type, and new tags are created on the spot.
+- **Labels**: type any task, or one or more tags (`#postdoc #meeting`), in a block's Label field. Suggestions appear as you type, and new tags are created on the spot. A task label brings in that task's tags.
 - **Review**: *Review N* button or the command *Review this week's time blocks*. One block at a time: `1`–`9` choose, `Enter` accept the suggestion, `0` not task work, `/` type any task or tag, `S` skip, `←` back.
 - **Export**: *Export CSV* writes `Time Logs/Time Log YYYY-MM-DD.csv` (one row per block).
 - **In a note**:
@@ -49,6 +49,8 @@ Role: postdoc (uist2026, chi2026), faculty (teaching), student (phd)
 ```
 
 Tags in parentheses also count toward that value, and nested tags (`#phd/thesis`) match their parent. Within one grouping each block counts once, so hours add up to the week's total.
+
+The plain **Tag** view counts a block under every tag it has, so its column can add up to more than the week's total. Totals, groupings and the CSV (one row per block) never double count.
 
 ## Files
 
