@@ -69,24 +69,6 @@
 .wtl-hbar.is-muted { background: var(--text-faint); }
 .wtl-hbar-value { color: var(--text-muted); font-size: var(--font-ui-small); font-variant-numeric: tabular-nums; }
 
-/* Hours by day: vertical bars */
-.wtl-vbars { display: flex; gap: 2px; height: 180px; align-items: stretch; }
-.wtl-vbar-col {
-  flex: 1;
-  display: flex; flex-direction: column; align-items: center;
-  border-radius: 4px; padding: 2px 0;
-}
-.wtl-vbar-col:hover { background: var(--background-modifier-hover); }
-.wtl-vbar-value { height: 1.4em; color: var(--text-muted); font-size: var(--font-ui-smaller); font-variant-numeric: tabular-nums; }
-.wtl-vbar-track {
-  flex: 1; width: 60%; max-width: 36px;
-  display: flex; align-items: flex-end;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
-.wtl-vbar { width: 100%; background: var(--wtl-bar); border-radius: 4px 4px 0 0; }
-.wtl-vbar-label { color: var(--text-normal); font-size: var(--font-ui-small); margin-top: 4px; }
-.wtl-vbar-sub { color: var(--text-faint); font-size: var(--font-ui-smaller); }
-
 /* Table */
 .wtl-table-wrap { overflow-x: auto; }
 .wtl-table { width: 100%; border-collapse: collapse; font-size: var(--font-ui-small); }
@@ -215,3 +197,45 @@
 .wtl-review-type { cursor: default; align-items: center; }
 .wtl-review-type .wtl-label-input { max-width: none; flex: 1; }
 .wtl-suggest-item .wtl-badge { margin-left: 6px; }
+
+/* Daily columns */
+.wtl-days-summary { color: var(--text-muted); font-size: var(--font-ui-small); margin-bottom: 8px; }
+.wtl-days { display: flex; gap: 2px; height: 150px; align-items: stretch; }
+.wtl-block .wtl-days { height: 110px; }
+.wtl-day { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; border-radius: 4px; padding: 2px 0; }
+.wtl-day:hover { background: var(--background-modifier-hover); }
+.wtl-day-value { height: 1.4em; color: var(--text-muted); font-size: var(--font-ui-smaller); font-variant-numeric: tabular-nums; }
+.wtl-day-track {
+  flex: 1; width: 60%; max-width: 32px;
+  display: flex; flex-direction: column-reverse; gap: 2px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.wtl-day-seg { width: 100%; background: var(--interactive-accent); flex: none; }
+.wtl-day-seg.is-other { background: var(--text-faint); opacity: 0.6; }
+.wtl-day-seg.is-top { border-radius: 4px 4px 0 0; }
+.wtl-day-label { color: var(--text-muted); font-size: var(--font-ui-smaller); margin-top: 4px; }
+.wtl-day-sub { color: var(--text-faint); font-size: var(--font-ui-smaller); }
+.wtl-day.is-today .wtl-day-label, .wtl-day.is-today .wtl-day-sub { color: var(--text-normal); font-weight: 600; }
+
+/* Timeline */
+.wtl-timeline { display: flex; flex-direction: column; gap: 4px; }
+.wtl-tl-row { display: grid; grid-template-columns: 52px 1fr 40px; align-items: center; gap: 8px; }
+.wtl-tl-label { color: var(--text-muted); font-size: var(--font-ui-smaller); white-space: nowrap; }
+.wtl-tl-row.is-today .wtl-tl-label { color: var(--text-normal); font-weight: 600; }
+.wtl-tl-track { position: relative; height: 16px; background: var(--background-modifier-hover); border-radius: 4px; }
+.wtl-tl-axis .wtl-tl-track { background: none; height: 14px; }
+.wtl-tl-tick { position: absolute; transform: translateX(-50%); color: var(--text-faint); font-size: var(--font-ui-smaller); white-space: nowrap; }
+.wtl-tl-grid { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--background-modifier-border); }
+.wtl-tl-block {
+  position: absolute; top: 2px; bottom: 2px; min-width: 3px;
+  background: var(--interactive-accent); border-radius: 4px;
+  box-shadow: 0 0 0 1px var(--background-primary);
+}
+.wtl-tl-block.is-other { background: var(--text-faint); opacity: 0.6; }
+.wtl-tl-block:hover { filter: brightness(1.1); }
+.wtl-tl-total { color: var(--text-muted); font-size: var(--font-ui-smaller); text-align: right; font-variant-numeric: tabular-nums; }
+
+.wtl-legend { display: flex; gap: 12px; margin-top: 8px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.wtl-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.wtl-swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--interactive-accent); }
+.wtl-swatch.is-other { background: var(--text-faint); opacity: 0.6; }

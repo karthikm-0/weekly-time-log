@@ -18,7 +18,7 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 
   ````
   ```time-log
-  show: hours        # full (default) | chart | hours
+  show: hours        # full (default) | chart | hours | days | timeline
   group: Role        # a tag grouping, or tag | task | calendar
   week: last         # this | last | 2026-09-28 | 2026-W40 (default: from the note's filename)
   ```

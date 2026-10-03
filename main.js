@@ -382,6 +382,130 @@ function renderTree(container, rows, { isOpen, toggle, tip, openTask }) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Daily views: columns (how much) and timeline (when)
+
+const sumHours = bs => bs.reduce((a, b) => a + b.hours, 0);
+const isOther = b => !!(b.choice && b.choice.kind === 'none'); // "Not task work"
+
+function dayRows(report) {
+  const days = [];
+  for (let d = report.start.clone(); d.isBefore(report.end); d.add(1, 'day')) {
+    const iso = d.format('YYYY-MM-DD');
+    const blocks = report.blocks.filter(b => b.date === iso);
+    const other = sumHours(blocks.filter(isOther));
+    const total = sumHours(blocks);
+    days.push({ day: d.clone(), iso, blocks, work: total - other, other, total });
+  }
+  return days;
+}
+
+function hourOf(m) {
+  return m.hours() + m.minutes() / 60;
+}
+
+function dayTip(d) {
+  const lines = [d.day.format('ddd MMM D'), `${d.work.toFixed(2)} h work`];
+  if (d.other) lines.push(`${d.other.toFixed(2)} h not task work`);
+  if (d.blocks.length) {
+    const first = d.blocks.reduce((a, b) => (b.start.isBefore(a.start) ? b : a));
+    const last = d.blocks.reduce((a, b) => (b.end.isAfter(a.end) ? b : a));
+    lines.push(`${first.start.format('h:mma')} – ${last.end.format('h:mma')} · ${plural(d.blocks.length, 'block')}`);
+  }
+  return lines.join('\n');
+}
+
+function legend(container, items) {
+  const lg = container.createDiv({ cls: 'wtl-legend' });
+  for (const [cls, label] of items) {
+    const it = lg.createSpan({ cls: 'wtl-legend-item' });
+    it.createSpan({ cls: `wtl-swatch ${cls}` });
+    it.createSpan({ text: label });
+  }
+}
+
+/** Hours per day as columns: work, with "not task work" stacked on top. */
+function renderDays(container, report, tip) {
+  const days = dayRows(report);
+  const work = days.reduce((a, d) => a + d.work, 0);
+  const active = days.filter(d => d.work > 0);
+  const busiest = active.reduce((a, d) => (!a || d.work > a.work ? d : a), null);
+  const parts = [`${fmtHours(work)} h of work`];
+  if (active.length) parts.push(`${fmtHours(work / active.length)} h avg over ${plural(active.length, 'day')}`);
+  if (busiest && active.length > 1) parts.push(`most on ${busiest.day.format('ddd')} (${fmtHours(busiest.work)} h)`);
+  container.createDiv({ cls: 'wtl-days-summary', text: parts.join(' · ') });
+
+  const max = Math.max(1, ...days.map(d => d.total));
+  const today = moment().format('YYYY-MM-DD');
+  const cols = container.createDiv({ cls: 'wtl-days' });
+  for (const d of days) {
+    const col = cols.createDiv({ cls: 'wtl-day' + (d.iso === today ? ' is-today' : '') + (d.total ? '' : ' is-empty') });
+    col.createDiv({ cls: 'wtl-day-value', text: d.work ? fmtHours(d.work) : '' });
+    const track = col.createDiv({ cls: 'wtl-day-track' });
+    const segs = [];
+    if (d.work) segs.push(['', d.work]);
+    if (d.other) segs.push([' is-other', d.other]);
+    segs.forEach(([cls, h], i) => {
+      const seg = track.createDiv({ cls: `wtl-day-seg${cls}${i === segs.length - 1 ? ' is-top' : ''}` });
+      seg.style.height = `${(h / max) * 100}%`;
+    });
+    col.createDiv({ cls: 'wtl-day-label', text: d.day.format('ddd') });
+    col.createDiv({ cls: 'wtl-day-sub', text: d.day.format('D') });
+    tip(col, dayTip(d));
+  }
+  if (days.some(d => d.other)) legend(container, [['', 'Work'], ['is-other', 'Not task work']]);
+}
+
+/** One row per day across the hours of the day; each block where it happened. */
+function renderTimeline(container, report, tip) {
+  const days = dayRows(report);
+  let lo = 24;
+  let hi = 0;
+  for (const b of report.blocks) {
+    const s0 = hourOf(b.start);
+    const e0 = b.end.isSame(b.start, 'day') ? hourOf(b.end) : 24;
+    lo = Math.min(lo, Math.floor(s0));
+    hi = Math.max(hi, Math.ceil(e0));
+  }
+  // Always show at least a 9–5 frame so short weeks still read as a workday.
+  lo = Math.min(lo, 9);
+  hi = Math.max(hi, 17);
+  const span = hi - lo;
+  const step = span > 12 ? 3 : 2;
+  const pct = h => `${((h - lo) / span) * 100}%`;
+
+  const wrap = container.createDiv({ cls: 'wtl-timeline' });
+  const axis = wrap.createDiv({ cls: 'wtl-tl-row wtl-tl-axis' });
+  axis.createDiv({ cls: 'wtl-tl-label' });
+  const ticks = axis.createDiv({ cls: 'wtl-tl-track' });
+  for (let h = Math.ceil(lo / step) * step; h <= hi; h += step) {
+    const t = ticks.createSpan({ cls: 'wtl-tl-tick', text: moment({ hour: h % 24 }).format('ha') });
+    t.style.left = pct(h);
+  }
+  axis.createDiv({ cls: 'wtl-tl-total' });
+
+  const today = moment().format('YYYY-MM-DD');
+  for (const d of days) {
+    const row = wrap.createDiv({ cls: 'wtl-tl-row' + (d.iso === today ? ' is-today' : '') });
+    row.createDiv({ cls: 'wtl-tl-label', text: d.day.format('ddd D') });
+    const track = row.createDiv({ cls: 'wtl-tl-track' });
+    for (let h = Math.ceil(lo / step) * step; h <= hi; h += step) {
+      track.createDiv({ cls: 'wtl-tl-grid' }).style.left = pct(h);
+    }
+    for (const b of d.blocks) {
+      const s0 = hourOf(b.start);
+      const e0 = b.end.isSame(b.start, 'day') ? hourOf(b.end) : 24;
+      const rect = track.createDiv({ cls: 'wtl-tl-block' + (isOther(b) ? ' is-other' : '') });
+      rect.style.left = pct(s0);
+      rect.style.width = `${((e0 - s0) / span) * 100}%`;
+      const label = b.choice ? choiceLabel(b.choice) : 'Unattached';
+      tip(rect, `${b.title}\n${b.start.format('ddd h:mm')}–${b.end.format('h:mma')} · ${fmtHours(b.hours)} h\n${label}`);
+    }
+    row.createDiv({ cls: 'wtl-tl-total', text: d.work ? `${fmtHours(d.work)} h` : '' });
+  }
+  if (report.blocks.some(isOther)) legend(container, [['', 'Work'], ['is-other', 'Not task work']]);
+}
+
 module.exports = class WeeklyTimeLogPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
@@ -1308,6 +1432,7 @@ class TimeLogView extends ItemView {
     const charts = root.createDiv({ cls: 'wtl-charts' });
     this.renderGrouped(charts.createDiv({ cls: 'wtl-card wtl-card-wide' }), report);
     this.renderByDay(charts.createDiv({ cls: 'wtl-card' }), report);
+    this.renderTimelineCard(charts.createDiv({ cls: 'wtl-card wtl-card-wide' }), report);
     this.renderTable(root.createDiv({ cls: 'wtl-card' }), report);
   }
 
@@ -1357,29 +1482,12 @@ class TimeLogView extends ItemView {
 
   renderByDay(card, report) {
     card.createEl('h4', { text: 'Hours by day' });
-    const days = [];
-    for (let d = report.start.clone(); d.isBefore(report.end); d.add(1, 'day')) {
-      const iso = d.format('YYYY-MM-DD');
-      const bs = report.blocks.filter(b => b.date === iso);
-      days.push({
-        label: d.format('ddd'), sub: d.format('D'), iso,
-        hours: bs.reduce((a, b) => a + b.hours, 0),
-        attached: bs.filter(b => b.task).reduce((a, b) => a + b.hours, 0),
-        n: bs.length,
-      });
-    }
-    const max = Math.max(1, ...days.map(d => d.hours));
-    const cols = card.createDiv({ cls: 'wtl-vbars' });
-    for (const d of days) {
-      const col = cols.createDiv({ cls: 'wtl-vbar-col' });
-      col.createDiv({ cls: 'wtl-vbar-value', text: d.hours ? fmtHours(d.hours) : '' });
-      const track = col.createDiv({ cls: 'wtl-vbar-track' });
-      const bar = track.createDiv({ cls: 'wtl-vbar' });
-      bar.style.height = `${(d.hours / max) * 100}%`;
-      col.createDiv({ cls: 'wtl-vbar-label', text: d.label });
-      col.createDiv({ cls: 'wtl-vbar-sub', text: d.sub });
-      this.hover(col, `${moment(d.iso).format('ddd MMM D')}\n${d.hours.toFixed(2)} h total · ${d.attached.toFixed(2)} h on tasks\n${plural(d.n, 'block')}`);
-    }
+    renderDays(card, report, (el, text) => this.hover(el, text));
+  }
+
+  renderTimelineCard(card, report) {
+    card.createEl('h4', { text: 'When you worked' });
+    renderTimeline(card, report, (el, text) => this.hover(el, text));
   }
 
   renderTable(card, report) {
@@ -1467,7 +1575,7 @@ class TimeLogView extends ItemView {
 //
 //   week: this | last | 2026-09-28 | 2026-W40   (default: from the note's filename, else this week)
 //   group: Project | Role | tag | task          (default: last view picked in the full log)
-//   show: full | chart | hours                  (default: full)
+//   show: full | chart | hours | days | timeline (default: full)
 
 /**
  * Returns { anchor } for dates / this / last, { year, week } for week numbers
@@ -1557,6 +1665,10 @@ class TimeLogBlock extends MarkdownRenderChild {
       head.createSpan({ cls: 'wtl-muted', text: '· current week (add "week: 2026-W40" to pin)' });
     }
 
+    const nativeTip = (node, text) => node.setAttr('aria-label', text);
+    if (show === 'days') return renderDays(el, report, nativeTip);
+    if (show === 'timeline') return renderTimeline(el, report, nativeTip);
+
     const total = report.blocks.reduce((a, b) => a + b.hours, 0);
     const confirmed = report.blocks.filter(b => b.status === 'confirmed').reduce((a, b) => a + b.hours, 0);
     const pending = report.blocks.filter(b => b.status !== 'confirmed').length;
@@ -1569,6 +1681,11 @@ class TimeLogBlock extends MarkdownRenderChild {
     stat(`${fmtHours(total)} h`, 'logged');
     stat(`${fmtHours(confirmed)} h`, 'confirmed');
     stat(String(pending), 'to review');
+
+    if (show === 'full' && report.blocks.length) {
+      el.createDiv({ cls: 'wtl-block-sub', text: 'By day' });
+      renderDays(el, report, nativeTip);
+    }
 
     // Grouped bars (collapsed; click a group to see its tasks)
     if (report.blocks.length) {
