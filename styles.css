@@ -267,3 +267,6 @@ body.theme-dark {
 }
 .wtl-timeline ~ .wtl-legend .wtl-swatch.is-other,
 .wtl-legend .wtl-swatch.is-other.is-outline { background: transparent; opacity: 1; border: 1px dashed var(--text-faint); }
+
+/* Hidden probe used to read tag colours */
+.wtl-probe { position: absolute; left: -9999px; top: 0; visibility: hidden; pointer-events: none; }

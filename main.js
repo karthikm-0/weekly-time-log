@@ -25,6 +25,7 @@ const DEFAULTS = {
   minScore: 0.55,
   autoExport: true,      // save last week's CSV daily, and re-save after reviewing
   remind: true,          // nudge while last week has unreviewed blocks
+  useTagColors: true,    // reuse colours tags already have (Colored Tags, snippets)
   lastCheck: null,       // ISO date of the last background check
   dataFile: DEFAULT_DATA_FILE,
   // blockKey -> { kind: 'task'|'tag'|'none', task, taskDesc, taskPath, tags, title, date }
@@ -428,6 +429,50 @@ function legend(container, items) {
 // styles.css as --wtl-c1..8). Stacks follow slot order, which is what keeps
 // neighbouring colours distinguishable, including for colour-blind readers.
 const SLOTS = 8;
+// Same hexes as styles.css; used to keep palette colours away from your own tag colours.
+const SLOT_HEX = {
+  light: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'],
+  dark: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'],
+};
+
+function toRgb(c) {
+  if (c.startsWith('#')) return [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
+  const m = c.match(/(\d+),\s*(\d+),\s*(\d+)/);
+  return m ? [m[1], m[2], m[3]].map(Number) : [0, 0, 0];
+}
+
+/** OKLab, for perceptual colour distance. */
+function oklab(c) {
+  const [r, g, b] = toRgb(c).map(v => {
+    v /= 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  });
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const z = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [
+    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * z,
+    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * z,
+    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * z,
+  ];
+}
+
+/** Perceptual distance (OKLab x100); under 15 two chart colours are too easy to confuse. */
+function colourDistance(a, b) {
+  const [p, q] = [oklab(a), oklab(b)];
+  return 100 * Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+}
+
+/** Of the free palette slots, the one furthest from every colour already on screen. */
+function furthestSlot(free, onScreen, theme) {
+  let best = free[0];
+  let bestD = -1;
+  for (const n of free) {
+    const d = onScreen.length ? Math.min(...onScreen.map(c => colourDistance(SLOT_HEX[theme][n - 1], c))) : Infinity;
+    if (d > bestD) { bestD = d; best = n; }
+  }
+  return best;
+}
 
 /**
  * The categories a block counts toward in the daily charts, as [{ key, label, share }].
@@ -460,18 +505,19 @@ function categoryDays(report, color) {
     for (const b of d.blocks) {
       for (const c of blockCategories(b, color.dim)) {
         labels.set(c.key, c.label);
-        const slot = color.slots.get(c.key);
-        const k = slot ? c.key : '~other';
+        const k = hasColor(color, c.key) ? c.key : '~other';
         bump(d.cats, k, b.hours * c.share);
         bump(week, c.key, b.hours * c.share);
       }
     }
   }
-  const folded = [...week.keys()].filter(k => !color.slots.get(k));
+  const folded = [...week.keys()].filter(k => !hasColor(color, k));
   const otherLabel = folded.length === 1 ? labels.get(folded[0]) : 'Other';
   // Legend order = stack order = slot order; grey bucket last.
-  const keys = [...week.keys()].filter(k => color.slots.get(k)).sort((a, b) => color.slots.get(a) - color.slots.get(b));
-  const series = keys.map(k => ({ key: k, label: labels.get(k), slot: color.slots.get(k), hours: week.get(k) }));
+  // Your own tag colours first (biggest first), then palette colours in slot order.
+  const custom = [...week.keys()].filter(k => color.custom.has(k)).sort((a, b) => week.get(b) - week.get(a));
+  const pal = [...week.keys()].filter(k => !color.custom.has(k) && color.slots.has(k)).sort((a, b) => color.slots.get(a) - color.slots.get(b));
+  const series = [...custom, ...pal].map(k => ({ key: k, label: labels.get(k), hours: week.get(k) }));
   if (folded.length) {
     series.push({ key: '~other', label: otherLabel, slot: null, hours: folded.reduce((a, k) => a + week.get(k), 0), folded: folded.map(k => labels.get(k)) });
   }
@@ -479,6 +525,13 @@ function categoryDays(report, color) {
 }
 
 const swatchClass = slot => (slot ? `wtl-c${slot}` : 'is-neutral');
+const hasColor = (color, key) => color.custom.has(key) || color.slots.has(key);
+
+/** Colour an element for a category: your tag colour, else a palette slot, else grey. */
+function paint(el, color, key) {
+  if (color.custom.has(key)) el.style.background = color.custom.get(key);
+  else el.addClass(swatchClass(color.slots.get(key)));
+}
 
 /** Height for one stacked segment: its share of the track minus its share of the 2px gaps. */
 function segHeight(h, max, n) {
@@ -535,7 +588,8 @@ function renderCategoryDays(container, report, tip, color, today) {
     const track = col.createDiv({ cls: 'wtl-day-track' });
     const segs = series.filter(sr => d.cats.get(sr.key));
     segs.forEach((sr, i) => {
-      const seg = track.createDiv({ cls: `wtl-day-seg ${swatchClass(sr.slot)}${i === segs.length - 1 ? ' is-top' : ''}` });
+      const seg = track.createDiv({ cls: `wtl-day-seg${i === segs.length - 1 ? ' is-top' : ''}` });
+      paint(seg, color, sr.key);
       seg.style.height = segHeight(d.cats.get(sr.key), max, segs.length);
     });
     col.createDiv({ cls: 'wtl-day-label', text: d.day.format('ddd') });
@@ -549,7 +603,7 @@ function renderCategoryDays(container, report, tip, color, today) {
   const lg = container.createDiv({ cls: 'wtl-legend is-wrap' });
   for (const sr of series) {
     const it = lg.createSpan({ cls: 'wtl-legend-item' });
-    it.createSpan({ cls: `wtl-swatch ${swatchClass(sr.slot)}` });
+    paint(it.createSpan({ cls: 'wtl-swatch' }), color, sr.key);
     it.createSpan({ text: sr.label });
     it.createSpan({ cls: 'wtl-legend-value', text: `${fmtHours1(sr.hours)} h` });
     if (sr.folded && sr.folded.length > 1) it.setAttr('aria-label', sr.folded.join(', '));
@@ -600,13 +654,12 @@ function renderTimeline(container, report, tip, color = null) {
     for (const b of d.blocks) {
       const s0 = hourOf(b.start);
       const e0 = b.end.isSame(b.start, 'day') ? hourOf(b.end) : 24;
-      let cls = isOther(b) ? ' is-other' : '';
+      const rect = track.createDiv({ cls: 'wtl-tl-block' + (isOther(b) ? ' is-other' : '') });
       if (color && !isOther(b)) {
         // Coloured by its largest category (first, for an even split).
         const cats = blockCategories(b, color.dim);
-        cls = ' ' + swatchClass(cats.length ? color.slots.get(cats[0].key) : null);
+        paint(rect, color, cats.length && hasColor(color, cats[0].key) ? cats[0].key : '~other');
       }
-      const rect = track.createDiv({ cls: 'wtl-tl-block' + cls });
       rect.style.left = pct(s0);
       rect.style.width = `${((e0 - s0) / span) * 100}%`;
       const label = b.choice ? choiceLabel(b.choice) : 'Unattached';
@@ -619,7 +672,7 @@ function renderTimeline(container, report, tip, color = null) {
     const lg = container.createDiv({ cls: 'wtl-legend is-wrap' });
     for (const sr of series) {
       const it = lg.createSpan({ cls: 'wtl-legend-item' });
-      it.createSpan({ cls: `wtl-swatch ${swatchClass(sr.slot)}` });
+      paint(it.createSpan({ cls: 'wtl-swatch' }), color, sr.key);
       it.createSpan({ text: sr.label });
     }
     if (report.blocks.some(isOther)) {
@@ -670,6 +723,12 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       ctx.addChild(new TimeLogBlock(this, el, source, ctx.sourcePath));
     });
     this.addSettingTab(new TimeLogSettings(this.app, this));
+    // Tag colours can change (theme switch, Colored Tags updates): re-read them.
+    this.registerEvent(this.app.workspace.on('css-change', () => {
+      this.tagBaseline = null;
+      this.tagColorCache = null;
+      this.refreshViews();
+    }));
 
     // Background check: shortly after startup (lets Google events load), then every few hours.
     this.app.workspace.onLayoutReady(() => {
@@ -678,7 +737,9 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     });
   }
 
-  onunload() {}
+  onunload() {
+    if (this.probeHost) this.probeHost.remove();
+  }
 
   // ---- Background export & reminder ---------------------------------------
 
@@ -1257,12 +1318,38 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
   colorsFor(report, dim) {
     if (!dim || dim.id === 'none') return null;
     const slots = new Map();
+    const custom = new Map();
+    const theme = typeof document !== 'undefined' && document.body.classList.contains('theme-dark') ? 'dark' : 'light';
     if (dim.group) {
-      dim.group.values.slice(0, SLOTS).forEach((v, i) => slots.set(v.name, i + 1));
-      return { dim, slots };
+      for (const v of dim.group.values) {
+        const c = v.aliases.map(a => this.tagColor(a)).find(Boolean);
+        if (c) custom.set(v.name, c);
+      }
+      // Values without a tag colour take palette colours, in settings order, each the
+      // free one furthest from what's already used. Deterministic, so colours stay put.
+      const onScreen = [...custom.values()];
+      let free = [...Array(SLOTS).keys()].map(i => i + 1);
+      for (const v of dim.group.values) {
+        if (custom.has(v.name) || !free.length) continue;
+        const n = furthestSlot(free, onScreen, theme);
+        slots.set(v.name, n);
+        onScreen.push(SLOT_HEX[theme][n - 1]);
+        free = free.filter(x => x !== n);
+      }
+      return { dim, slots, custom };
+    }
+    if (dim.id === 'tag') {
+      for (const b of report.blocks) for (const c of blockCategories(b, dim)) {
+        if (c.key !== '~' && !custom.has(c.key)) {
+          const col = this.tagColor(c.key);
+          if (col) custom.set(c.key, col);
+        }
+      }
     }
     const hours = new Map();
-    for (const b of report.blocks) for (const c of blockCategories(b, dim)) if (c.key !== '~') bump(hours, c.key, b.hours * c.share);
+    // Palette slots only for categories without a colour of their own.
+    for (const b of report.blocks) for (const c of blockCategories(b, dim)) if (c.key !== '~' && !custom.has(c.key)) bump(hours, c.key, b.hours * c.share);
+    const onScreen = [...custom.values()];
     const all = (this.settings.colors = this.settings.colors || {});
     const store = (all[dim.id] = all[dim.id] || {});
     const week = report.start.format('YYYY-MM-DD');
@@ -1270,7 +1357,9 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     for (const key of [...hours.keys()].sort((a, b) => hours.get(b) - hours.get(a))) {
       if (!store[key]) {
         const used = new Set(Object.values(store).map(e => e.slot));
-        let slot = [...Array(SLOTS).keys()].map(i => i + 1).find(n => !used.has(n));
+        const free = [...Array(SLOTS).keys()].map(i => i + 1).filter(n => !used.has(n));
+        // The free palette colour furthest from your tag colours and the others shown.
+        let slot = free.length ? furthestSlot(free, onScreen, theme) : undefined;
         if (!slot) {
           const victim = Object.entries(store)
             .filter(([k]) => !hours.has(k))
@@ -1281,6 +1370,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         }
         store[key] = { slot, seen: week };
         changed = true;
+        onScreen.push(SLOT_HEX[theme][slot - 1]);
       } else if (store[key].seen < week) {
         store[key].seen = week;
         changed = true;
@@ -1288,7 +1378,45 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       slots.set(key, store[key].slot);
     }
     if (changed) this.saveSettings();
-    return { dim, slots };
+    return { dim, slots, custom };
+  }
+
+  /**
+   * The colour a tag already shows in this vault (Colored Tags plugin, CSS snippets,
+   * themes), read from a hidden tag pill; null if it only has the theme's default.
+   */
+  tagColor(tag) {
+    if (!this.settings.useTagColors || typeof document === 'undefined') return null;
+    if (!this.probeHost) {
+      this.probeHost = document.body.createDiv({ cls: 'markdown-preview-view markdown-rendered wtl-probe' });
+    }
+    const read = t => {
+      const a = this.probeHost.createEl('a', { cls: 'tag', text: `#${t}`, href: `#${t}` });
+      const cs = getComputedStyle(a);
+      const out = [cs.backgroundColor, cs.color];
+      a.remove();
+      return out;
+    };
+    if (!this.tagBaseline) this.tagBaseline = read('wtl-probe-no-such-tag');
+    this.tagColorCache = this.tagColorCache || new Map();
+    if (this.tagColorCache.has(tag)) return this.tagColorCache.get(tag);
+    let best = null;
+    for (const t of [tag, tag.toLowerCase()]) {
+      const [bg, fg] = read(t);
+      // Use whichever of pill background / text differs from the default and is most colourful.
+      let bestChroma = 0.12;
+      for (const [c, base] of [[bg, this.tagBaseline[0]], [fg, this.tagBaseline[1]]]) {
+        if (c === base) continue;
+        const m = c.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+        if (!m || (m[4] !== undefined && Number(m[4]) === 0)) continue;
+        const [r, g, b] = [m[1], m[2], m[3]].map(Number);
+        const chroma = (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
+        if (chroma > bestChroma) { bestChroma = chroma; best = `rgb(${r}, ${g}, ${b})`; }
+      }
+      if (best) break;
+    }
+    this.tagColorCache.set(tag, best);
+    return best;
   }
 
   // ---- Export --------------------------------------------------------------
@@ -2137,6 +2265,17 @@ class TimeLogSettings extends PluginSettingTab {
       .setName('Review reminders')
       .setDesc('Once a day, remind me while last week still has blocks to review.')
       .addToggle(t => t.setValue(s.remind).onChange(async v => { s.remind = v; await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl)
+      .setName('Use my tag colours in charts')
+      .setDesc('Charts reuse the colours your tags already have (e.g. from the Colored Tags plugin or CSS snippets). ' +
+        'Tags without one get a colour from a colour-blind-safe palette.')
+      .addToggle(t => t.setValue(s.useTagColors).onChange(async v => {
+        s.useTagColors = v;
+        this.plugin.tagColorCache = null;
+        await this.plugin.saveSettings();
+        this.plugin.refreshViews();
+      }));
 
     new Setting(containerEl)
       .setName('Suggestion strictness')
