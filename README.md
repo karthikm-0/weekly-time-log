@@ -11,7 +11,8 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 ## Use
 
 - **Full log**: ribbon clock icon or the command *Open weekly time log*. Week navigation, totals, hours by tag/grouping (expand a group to see its tasks), hours by day, and a table of every block with its label.
-- **Review**: *Review N* button or the command *Review this week's time blocks*. One block at a time: `1`–`9` choose, `Enter` accept the suggestion, `0` not task work, `/` search tasks and tags, `S` skip, `←` back.
+- **Labels**: type any task or `#tag` in a block's Label field; suggestions appear as you type, and new tags are created on the spot.
+- **Review**: *Review N* button or the command *Review this week's time blocks*. One block at a time: `1`–`9` choose, `Enter` accept the suggestion, `0` not task work, `/` type any task or tag, `S` skip, `←` back.
 - **Export**: *Export CSV* writes `Time Logs/Time Log YYYY-MM-DD.csv` (one row per block).
 - **In a note**:
 
@@ -56,4 +57,10 @@ Tags in parentheses also count toward that value, and nested tags (`#phd/thesis`
 | `main.js` | All plugin code. Plain CommonJS, no build step. |
 | `styles.css` | Styles; uses Obsidian theme variables. |
 | `manifest.json` | Plugin metadata. |
-| `data.json` | Created at runtime: settings, confirmed labels, API token. Not committed. |
+| `data.json` | Created at runtime: only this install's Full Calendar token and last background check. Not committed. |
+
+## Where your data lives
+
+Labels and settings are stored **in the vault**, at `Time Logs/time-log-data.json` (configurable under *Data file*), not in the plugin folder. Replacing, reinstalling or upgrading the plugin keeps them, and they sync and back up with the vault. It's one file for all weeks, since suggestions learn from every label at once. Weekly CSVs are written next to it, one per week.
+
+If that file can't be parsed, the plugin shows a notice and never overwrites it.

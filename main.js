@@ -1,12 +1,18 @@
 'use strict';
 
 const {
-  Plugin, ItemView, Modal, FuzzySuggestModal, MarkdownRenderChild, Notice, PluginSettingTab, Setting, moment,
-  normalizePath, TFile,
+  Plugin, ItemView, Modal, AbstractInputSuggest, MarkdownRenderChild, Notice, PluginSettingTab, Setting, moment,
+  normalizePath, prepareFuzzySearch, TFile,
 } = require('obsidian');
 
 const VIEW_TYPE = 'weekly-time-log-view';
 const FC_ID = 'full-calendar-remastered';
+
+// Storage is split so a plugin reinstall/upgrade never loses your labels:
+//  - vault file (dataFile): labels and preferences; syncs and backs up with the vault
+//  - plugin data.json: only what belongs to this install
+const DEFAULT_DATA_FILE = 'Time Logs/time-log-data.json';
+const LOCAL_KEYS = ['token', 'lastCheck', 'dataFile'];
 
 const DEFAULTS = {
   token: null,           // Full Calendar API token
@@ -20,6 +26,7 @@ const DEFAULTS = {
   autoExport: true,      // save last week's CSV daily, and re-save after reviewing
   remind: true,          // nudge while last week has unreviewed blocks
   lastCheck: null,       // ISO date of the last background check
+  dataFile: DEFAULT_DATA_FILE,
   // blockKey -> { kind: 'task'|'tag'|'none', task, taskDesc, taskPath, tags, title, date }
   // Every confirmed label; also the training data for future suggestions.
   annotations: {},
@@ -366,9 +373,7 @@ function renderTree(container, rows, { isOpen, toggle, tip, openTask }) {
 
 module.exports = class WeeklyTimeLogPlugin extends Plugin {
   async onload() {
-    this.settings = Object.assign({}, DEFAULTS, await this.loadData());
-    this.settings.annotations = this.settings.annotations || {};
-    this.migrateOverrides();
+    await this.loadSettings();
 
     this.registerView(VIEW_TYPE, leaf => new TimeLogView(leaf, this));
     this.addRibbonIcon('clock', 'Open weekly time log', () => this.openView());
@@ -481,8 +486,46 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     this.saveSettings();
   }
 
+  async loadSettings() {
+    const local = (await this.loadData()) || {};
+    this.settings = Object.assign({}, DEFAULTS, local);
+    const shared = await this.readDataFile();
+    if (shared) {
+      for (const [k, v] of Object.entries(shared)) if (!LOCAL_KEYS.includes(k) && k !== 'version') this.settings[k] = v;
+    }
+    this.settings.annotations = this.settings.annotations || {};
+    this.migrateOverrides();
+    // First run with the vault file (or upgrade from plugin-only storage): write it out.
+    if (!shared) await this.saveSettings();
+  }
+
+  async readDataFile() {
+    const adapter = this.app.vault.adapter;
+    const path = normalizePath(this.settings ? this.settings.dataFile : DEFAULT_DATA_FILE);
+    try {
+      if (!(await adapter.exists(path))) return null;
+      return JSON.parse(await adapter.read(path));
+    } catch (e) {
+      // Never overwrite a file we couldn't parse; fall back to what's in memory.
+      this.dataFileError = `${path}: ${e.message}`;
+      new Notice(`Weekly Time Log: couldn't read ${path} (${e.message}). Not overwriting it.`);
+      return null;
+    }
+  }
+
   async saveSettings() {
-    await this.saveData(this.settings);
+    const local = {};
+    const shared = { version: 1 };
+    for (const [k, v] of Object.entries(this.settings)) {
+      if (LOCAL_KEYS.includes(k)) local[k] = v; else shared[k] = v;
+    }
+    await this.saveData(local);
+    if (this.dataFileError) return;
+    const adapter = this.app.vault.adapter;
+    const path = normalizePath(this.settings.dataFile || DEFAULT_DATA_FILE);
+    const folder = path.split('/').slice(0, -1).join('/');
+    if (folder && !(await adapter.exists(folder))) await adapter.mkdir(folder);
+    await adapter.write(path, JSON.stringify(shared, null, 2));
   }
 
   /** Opens the full log, optionally at the week starting `weekStart`. */
@@ -966,6 +1009,105 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 };
 
 // ---------------------------------------------------------------------------
+// Typed label picker: suggestions while you type, or create a new tag
+
+/** Everything one block can be labeled with; its own suggestions first. */
+function labelItems(report, b) {
+  const items = [];
+  const seen = new Set();
+  const push = (choice, extra = {}) => {
+    const v = choiceValue(choice);
+    if (seen.has(v)) return;
+    seen.add(v);
+    items.push({ choice, ...extra });
+  };
+  if (b.suggestion) push(b.suggestion, { suggested: true, reasons: b.suggestion.reasons });
+  for (const c of b.candidates.slice(0, 5)) push({ kind: 'task', task: c.task }, { likely: true, reasons: c.reasons });
+  for (const t of b.tagRank.slice(0, 3)) push({ kind: 'tag', tag: t.tag }, { likely: true, reasons: [t.why] });
+  push({ kind: 'none' }, { likely: true });
+  for (const t of report.tasks) push({ kind: 'task', task: t });
+  for (const tg of report.tagVocab) push({ kind: 'tag', tag: tg });
+  return items;
+}
+
+function itemSearchText(it) {
+  const c = it.choice;
+  if (c.kind === 'task') return `${c.task.desc} ${c.task.tags.map(t => '#' + t).join(' ')}`;
+  if (c.kind === 'tag') return `#${c.tag}`;
+  return 'Not task work';
+}
+
+/** "Grant reporting" -> "grant_reporting"; Obsidian tags can't contain spaces. */
+function normalizeTag(text) {
+  return text.trim().replace(/^#+/, '').replace(/\s+/g, '_').replace(/[^\p{L}\p{N}_/-]/gu, '');
+}
+
+/** Pure ranking, separate from the UI so it is easy to test. */
+function rankLabels(items, query) {
+  const q = query.trim();
+  if (!q) return items.filter(i => i.suggested || i.likely);
+  const fuzzy = prepareFuzzySearch(q.replace(/^#/, ''));
+  const hits = [];
+  for (const it of items) {
+    const m = fuzzy(itemSearchText(it));
+    if (m) hits.push({ it, score: m.score + (it.suggested ? 2 : it.likely ? 1 : 0) });
+  }
+  hits.sort((a, b) => b.score - a.score);
+  const out = hits.map(h => h.it).slice(0, 30);
+  const tag = normalizeTag(q);
+  const exists = items.some(i => i.choice.kind === 'tag' && i.choice.tag.toLowerCase() === tag.toLowerCase());
+  if (tag && !exists) {
+    const create = { choice: { kind: 'tag', tag }, create: true };
+    // A leading "#" means "this is a tag": offer creating it first, unless an existing tag matches.
+    const tagHit = out.some(i => i.choice.kind === 'tag');
+    if (!out.length || (q.startsWith('#') && !tagHit)) out.unshift(create); else out.push(create);
+  }
+  return out;
+}
+
+class LabelSuggest extends AbstractInputSuggest {
+  constructor(app, inputEl, items, onPick) {
+    super(app, inputEl);
+    this.items = items;
+    this.onPick = onPick;
+    this.limit = 40;
+    // Show this block's suggestions as soon as the field is focused.
+    inputEl.addEventListener('focus', () => inputEl.dispatchEvent(new Event('input')));
+  }
+
+  getSuggestions(query) {
+    return rankLabels(this.items, query);
+  }
+
+  renderSuggestion(it, el) {
+    el.addClass('wtl-suggest-item');
+    const top = el.createDiv({ cls: 'wtl-suggest-top' });
+    const c = it.choice;
+    if (it.create) {
+      top.createSpan({ text: `Create tag #${c.tag}` });
+    } else if (c.kind === 'task') {
+      top.createSpan({ text: c.task.desc });
+      const meta = [];
+      if (c.task.tags.length) meta.push(c.task.tags.map(t => '#' + t).join(' '));
+      if (c.task.scheduled) meta.push(`⏳ ${c.task.scheduled}`);
+      if (meta.length) top.createSpan({ cls: 'wtl-review-meta', text: '  ' + meta.join('  ') });
+    } else if (c.kind === 'tag') {
+      top.createSpan({ text: `#${c.tag}` });
+      top.createSpan({ cls: 'wtl-review-meta', text: '  tag only' });
+    } else {
+      top.createSpan({ text: 'Not task work' });
+    }
+    if (it.suggested) top.createSpan({ cls: 'wtl-badge wtl-badge-suggested', text: 'suggested' });
+    if (it.reasons && it.reasons.length) el.createDiv({ cls: 'wtl-review-why', text: it.reasons.join(' · ') });
+  }
+
+  selectSuggestion(it) {
+    this.close();
+    this.onPick(it.choice);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // View
 
 class TimeLogView extends ItemView {
@@ -1165,15 +1307,12 @@ class TimeLogView extends ItemView {
       const b = head.createEl('button', { text: 'Accept all suggestions' });
       b.onclick = () => this.acceptAll();
     }
-    card.createDiv({ cls: 'wtl-muted', text: 'Suggestions learn from what you confirm. Pick a label to confirm it, or ✓ to accept the suggestion.' });
+    card.createDiv({ cls: 'wtl-muted', text: 'Type a task or #tag in Label (new tags are fine), or ✓ to accept the suggestion. Suggestions learn from what you confirm.' });
     const wrap = card.createDiv({ cls: 'wtl-table-wrap' });
     const table = wrap.createEl('table', { cls: 'wtl-table' });
     const tr0 = table.createEl('thead').createEl('tr');
     for (const h of ['Day', 'Time', 'Block', 'Hours', 'Label', 'Status']) tr0.createEl('th', { text: h });
     const body = table.createEl('tbody');
-
-    const allTasks = [...report.tasks].sort((a, b) =>
-      (a.scheduled || '9999').localeCompare(b.scheduled || '9999') || a.desc.localeCompare(b.desc));
 
     for (const b of report.blocks) {
       const tr = body.createEl('tr');
@@ -1182,40 +1321,31 @@ class TimeLogView extends ItemView {
       tr.createEl('td', { text: b.title });
       tr.createEl('td', { text: fmtHours(b.hours), cls: 'wtl-num' });
 
-      const options = new Map(); // value -> choice
-      const sel = tr.createEl('td').createEl('select', { cls: 'dropdown wtl-select' });
-      const opt = (parent, choice, text) => {
-        const v = choice ? choiceValue(choice) : '';
-        if (options.has(v)) return;
-        options.set(v, choice);
-        parent.createEl('option', { text, value: v });
-      };
-      if (b.status !== 'confirmed') opt(sel, null, '— unattached —');
-      opt(sel, { kind: 'none' }, 'Not task work');
-      if (b.status === 'confirmed' && b.suggestion) {
-        sel.createEl('option', { text: '↺ Forget my label', value: '__reset__' });
-      }
-      const g1 = sel.createEl('optgroup');
-      g1.label = 'Suggested';
-      if (b.status === 'confirmed' && b.choice.kind === 'task') opt(g1, b.choice, this.taskLabel(b.choice.task));
-      for (const c of b.candidates.slice(0, 5)) opt(g1, { kind: 'task', task: c.task }, this.taskLabel(c.task));
-      for (const t of b.tagRank.slice(0, 3)) opt(g1, { kind: 'tag', tag: t.tag }, `#${t.tag} (tag only)`);
-      if (b.choice && b.choice.kind === 'tag') opt(g1, b.choice, `#${b.choice.tag} (tag only)`);
-      const g2 = sel.createEl('optgroup');
-      g2.label = 'All tasks';
-      for (const t of allTasks) opt(g2, { kind: 'task', task: t }, this.taskLabel(t));
-      const g3 = sel.createEl('optgroup');
-      g3.label = 'Tags';
-      for (const tg of report.tagVocab) opt(g3, { kind: 'tag', tag: tg }, `#${tg} (tag only)`);
-
-      sel.value = choiceValue(b.choice);
-      sel.onchange = async () => {
-        if (sel.value === '__reset__') await this.plugin.annotate(report, b, null);
-        else if (sel.value === '') await this.plugin.annotate(report, b, null);
-        else await this.plugin.annotate(report, b, options.get(sel.value));
+      const cell = tr.createEl('td', { cls: 'wtl-label-cell' });
+      const current = b.choice ? choiceLabel(b.choice) : '';
+      const input = cell.createEl('input', {
+        type: 'text',
+        cls: 'wtl-label-input' + (b.status === 'confirmed' ? '' : ' is-pending'),
+        value: current,
+        attr: { placeholder: 'Type a task or #tag…', spellcheck: 'false' },
+      });
+      // Clear on focus so suggestions show; put the label back if nothing was picked.
+      input.addEventListener('focus', () => { input.value = ''; }, true);
+      input.addEventListener('blur', () => { window.setTimeout(() => { if (!input.value) input.value = current; }, 200); });
+      new LabelSuggest(this.app, input, labelItems(report, b), async choice => {
+        await this.plugin.annotate(report, b, choice);
         this.rerender();
         this.scheduleSave();
-      };
+      });
+      if (b.status === 'confirmed' && b.suggestion && choiceValue(b.suggestion) !== choiceValue(b.choice)) {
+        const reset = cell.createEl('button', { cls: 'wtl-accept clickable-icon', text: '↺' });
+        reset.setAttr('aria-label', `Forget my label (suggestion: ${choiceLabel(b.suggestion)})`);
+        reset.onclick = async () => {
+          await this.plugin.annotate(report, b, null);
+          this.rerender();
+          this.scheduleSave();
+        };
+      }
 
       const st = tr.createEl('td', { cls: 'wtl-status' });
       const badge = st.createSpan({ cls: `wtl-badge wtl-badge-${b.status}`, text: b.status === 'open' ? 'unattached' : b.status });
@@ -1419,13 +1549,19 @@ class ReviewModal extends Modal {
 
   onOpen() {
     this.modalEl.addClass('wtl-review');
-    for (let n = 1; n <= 9; n++) this.scope.register([], String(n), () => { this.pick(n - 1); return false; });
-    this.scope.register([], '0', () => { this.choose({ kind: 'none' }); return false; });
-    this.scope.register([], 'Enter', () => { this.pick(0); return false; });
-    this.scope.register([], 's', () => { this.next(); return false; });
-    this.scope.register([], 'ArrowRight', () => { this.next(); return false; });
-    this.scope.register([], 'ArrowLeft', () => { this.prev(); return false; });
-    this.scope.register([], '/', () => { this.pickOther(); return false; });
+    // Shortcuts are off while typing in the label field.
+    const key = (k, fn) => this.scope.register([], k, () => {
+      if (this.input && document.activeElement === this.input) return true;
+      fn();
+      return false;
+    });
+    for (let n = 1; n <= 9; n++) key(String(n), () => this.pick(n - 1));
+    key('0', () => this.choose({ kind: 'none' }));
+    key('Enter', () => this.pick(0));
+    key('s', () => this.next());
+    key('ArrowRight', () => this.next());
+    key('ArrowLeft', () => this.prev());
+    key('/', () => this.input && this.input.focus());
     this.render();
   }
 
@@ -1505,13 +1641,17 @@ class ReviewModal extends Modal {
     }
     noneRow.onclick = () => this.choose({ kind: 'none' });
 
-    const other = list.createDiv({ cls: 'wtl-review-option' });
-    other.createSpan({ cls: 'wtl-key', text: '/' });
-    other.createDiv({ cls: 'wtl-review-option-name', text: 'Another task or tag…' });
-    other.onclick = () => this.pickOther();
+    const typed = list.createDiv({ cls: 'wtl-review-option wtl-review-type' });
+    typed.createSpan({ cls: 'wtl-key', text: '/' });
+    this.input = typed.createEl('input', {
+      type: 'text',
+      cls: 'wtl-label-input',
+      attr: { placeholder: 'Type any task or #tag (new tags are fine)…', spellcheck: 'false' },
+    });
+    new LabelSuggest(this.app, this.input, labelItems(this.report, b), choice => this.choose(choice));
 
     const foot = el.createDiv({ cls: 'wtl-review-foot' });
-    foot.createDiv({ cls: 'wtl-muted', text: '1–9 choose · Enter accept suggestion · 0 not task work · S skip · ← back' });
+    foot.createDiv({ cls: 'wtl-muted', text: '1–9 choose · Enter accept suggestion · 0 not task work · / type · S skip · ← back' });
     const btns = foot.createDiv({ cls: 'wtl-review-buttons' });
     if (this.i > 0) btns.createEl('button', { text: 'Back' }).onclick = () => this.prev();
     btns.createEl('button', { text: 'Skip' }).onclick = () => this.next();
@@ -1538,27 +1678,6 @@ class ReviewModal extends Modal {
     if (this.i > 0) this.i--;
     this.render();
   }
-
-  pickOther() {
-    const items = [
-      ...this.report.tasks.map(t => ({ label: t.desc + (t.tags.length ? '  ' + t.tags.map(x => '#' + x).join(' ') : ''), choice: { kind: 'task', task: t } })),
-      ...this.report.tagVocab.map(tg => ({ label: `#${tg} (tag only)`, choice: { kind: 'tag', tag: tg } })),
-    ];
-    new PickerModal(this.app, items, item => this.choose(item.choice)).open();
-  }
-}
-
-class PickerModal extends FuzzySuggestModal {
-  constructor(app, items, onPick) {
-    super(app);
-    this.items = items;
-    this.onPick = onPick;
-    this.setPlaceholder('Search tasks and tags…');
-  }
-
-  getItems() { return this.items; }
-  getItemText(item) { return item.label; }
-  onChooseItem(item) { this.onPick(item); }
 }
 
 // ---------------------------------------------------------------------------
@@ -1644,6 +1763,18 @@ class TimeLogSettings extends PluginSettingTab {
         s.annotations = {};
         await this.plugin.saveSettings();
         this.display();
+      }));
+
+    new Setting(containerEl)
+      .setName('Data file')
+      .setDesc('Your labels and these settings live in this vault file, so reinstalling or upgrading the plugin keeps them. ' +
+        'Changing the path writes a copy there; the old file is left in place.')
+      .addText(t => t.setValue(s.dataFile).onChange(async v => {
+        const path = v.trim();
+        if (!path.endsWith('.json')) return;
+        s.dataFile = path;
+        this.plugin.dataFileError = null;
+        await this.plugin.saveSettings();
       }));
 
     new Setting(containerEl)

@@ -207,3 +207,11 @@
 .wtl-block-line { padding: 4px 0; color: var(--text-normal); }
 .wtl-block-line .wtl-muted { margin: 0; font-size: inherit; }
 .wtl-line-total { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Typed label field */
+.wtl-label-cell { display: flex; align-items: center; gap: 4px; min-width: 220px; }
+.wtl-label-input { width: 100%; max-width: 340px; }
+.wtl-label-input.is-pending { color: var(--text-muted); font-style: italic; }
+.wtl-review-type { cursor: default; align-items: center; }
+.wtl-review-type .wtl-label-input { max-width: none; flex: 1; }
+.wtl-suggest-item .wtl-badge { margin-left: 6px; }
