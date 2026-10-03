@@ -1,0 +1,5 @@
+# Per-vault state: Full Calendar API token + your confirmed labels
+data.json
+
+.DS_Store
+node_modules/
