@@ -575,11 +575,27 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     return { sources, firstDay };
   }
 
-  /** The week containing `anchor` (default today), shifted by `offset` weeks. */
-  async weekBounds(offset = 0, anchor = null, firstDay = null) {
-    let first = firstDay ?? this.settings.weekStart;
+  /** 0 = Sunday, 1 = Monday; "Same as calendar" reads Full Calendar's setting. */
+  async firstDay() {
+    let first = this.settings.weekStart;
     if (first === 'calendar') first = (await this.calendarSources()).firstDay;
-    first = Number(first) || 0;
+    return Number(first) || 0;
+  }
+
+  /**
+   * Start of week number `week` in `year`. Monday weeks use ISO numbering;
+   * other starts use "week 1 contains Jan 1" (US-style, e.g. Sunday weeks).
+   */
+  async weekNumberStart(year, week) {
+    const first = await this.firstDay();
+    if (first === 1) return moment(`${year}-W${String(week).padStart(2, '0')}-1`, 'GGGG-[W]WW-E');
+    const jan1 = moment(`${year}-01-01`, 'YYYY-MM-DD');
+    return jan1.subtract((jan1.day() - first + 7) % 7, 'days').add((week - 1) * 7, 'days');
+  }
+
+  /** The week containing `anchor` (default today), shifted by `offset` weeks. */
+  async weekBounds(offset = 0, anchor = null) {
+    const first = await this.firstDay();
     const day = (anchor ? moment(anchor) : moment()).startOf('day');
     const start = day.clone().subtract((day.day() - first + 7) % 7, 'days').add(offset * 7, 'days');
     return { start, end: start.clone().add(7, 'days') };
@@ -890,8 +906,8 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     this.refreshBlocks();
   }
 
-  async buildReport(offset = 0, anchor = null, firstDay = null) {
-    const { start, end } = await this.weekBounds(offset, anchor, firstDay);
+  async buildReport(offset = 0, anchor = null) {
+    const { start, end } = await this.weekBounds(offset, anchor);
     const [blocks, tasks] = await Promise.all([
       this.collectBlocks(start, end),
       this.collectTasks(start.format('YYYY-MM-DD')),
@@ -1240,22 +1256,21 @@ class TimeLogView extends ItemView {
 //   show: full | chart | hours                  (default: full)
 
 /**
- * Returns { anchor, iso } or null. ISO week references ("2026-W40", "W40") mean
- * Monday–Sunday regardless of the week-start setting, matching weekly notes.
- * `year` fills in references without one (e.g. from a "2026/" folder).
+ * Returns { anchor } for dates / this / last, { year, week } for week numbers
+ * ("2026-W40", "W40", "Week 40"), or null. Week numbers are turned into dates
+ * later using the week-start setting. `year` fills in references without one.
  */
 function parseWeekRef(ref, year = null) {
   if (!ref) return null;
   const r = String(ref).trim().toLowerCase();
-  if (r === 'this') return { anchor: moment(), iso: false };
-  if (r === 'last') return { anchor: moment().subtract(7, 'days'), iso: false };
-  const iso = (y, w) => ({ anchor: moment(`${y}-W${String(w).padStart(2, '0')}-1`, 'GGGG-[W]WW-E'), iso: true });
+  if (r === 'this') return { anchor: moment() };
+  if (r === 'last') return { anchor: moment().subtract(7, 'days') };
   let m = r.match(/(\d{4})[-\s_.]*w(\d{1,2})\b/);
-  if (m) return iso(m[1], m[2]);
+  if (m) return { year: Number(m[1]), week: Number(m[2]) };
   m = r.match(/\d{4}-\d{2}-\d{2}/);
-  if (m) return { anchor: moment(m[0], 'YYYY-MM-DD'), iso: false };
+  if (m) return { anchor: moment(m[0], 'YYYY-MM-DD') };
   m = r.match(/(?:^|[^a-z0-9])w(?:eek)?\s*(\d{1,2})\b/);
-  if (m) return iso(year || moment().isoWeekYear(), m[1]);
+  if (m) return { year: Number(year) || moment().year(), week: Number(m[1]) };
   return null;
 }
 
@@ -1281,7 +1296,7 @@ class TimeLogBlock extends MarkdownRenderChild {
     return parseWeekRef(this.opts.week, year)
       || parseWeekRef(fm.week, year) || parseWeekRef(fm.date, year)
       || parseWeekRef(name, year) || parseWeekRef(path, year)
-      || { anchor: moment(), iso: false, guessed: true };
+      || { anchor: moment(), guessed: true };
   }
 
   onload() {
@@ -1300,7 +1315,8 @@ class TimeLogBlock extends MarkdownRenderChild {
     let report;
     try {
       this.week = this.resolveWeek();
-      report = await this.plugin.buildReport(0, this.week.anchor, this.week.iso ? 1 : null);
+      const anchor = this.week.anchor || await this.plugin.weekNumberStart(this.week.year, this.week.week);
+      report = await this.plugin.buildReport(0, anchor);
     } catch (e) {
       el.createDiv({ cls: 'wtl-error', text: `Time log: ${e.message}` });
       return;
