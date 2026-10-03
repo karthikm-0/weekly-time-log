@@ -1535,6 +1535,15 @@ class TimeLogBlock extends MarkdownRenderChild {
       el.createDiv({ cls: 'wtl-error', text: `Time log: ${e.message}` });
       return;
     }
+    // Keep this week's CSV current while the block is on screen. Re-renders on every
+    // label change; unchanged CSVs aren't rewritten and empty weeks are never saved.
+    if (this.plugin.settings.autoExport && report.blocks.length) {
+      try {
+        await this.plugin.exportCsv(report, { quiet: true });
+      } catch (e) {
+        console.warn('Weekly Time Log: CSV save failed', e);
+      }
+    }
     const { path } = this.plugin.csvPath(report.start);
 
     const show = (this.opts.show || 'full').toLowerCase();
@@ -1825,7 +1834,8 @@ class TimeLogSettings extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Auto-save CSV')
-      .setDesc('Once a day, save last week\'s CSV (unreviewed blocks are marked "suggested"). Re-saves after you review.')
+      .setDesc('Keep CSVs in the export folder current: whenever a time-log block is shown or its labels change, ' +
+        'and once a day for last week. Unreviewed blocks are marked "suggested".')
       .addToggle(t => t.setValue(s.autoExport).onChange(async v => { s.autoExport = v; await this.plugin.saveSettings(); }));
 
     new Setting(containerEl)

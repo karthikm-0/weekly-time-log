@@ -26,7 +26,7 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 
 ## Automatic
 
-Once a day (the first time Obsidian is open), last week's CSV is saved and, if anything is unreviewed, a reminder appears. Reviewing re-saves the CSV. Both can be turned off in settings. The background check never opens the access dialog and never saves an empty week.
+Whenever a `time-log` block is shown, its week's CSV is saved to the export folder and re-saved each time a label changes (unchanged files aren't rewritten). Once a day (the first time Obsidian is open), last week's CSV is also saved and, if anything is unreviewed, a reminder appears. Reviewing re-saves the CSV. Both can be turned off in settings. The background check never opens the access dialog and never saves an empty week.
 
 ## How blocks are matched
 
