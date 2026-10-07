@@ -19,7 +19,8 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
   ````
   ```time-log
   show: hours        # full (default) | chart | hours | days | timeline
-  group: Role        # a tag grouping, or tag | task | calendar | none (colours daily charts too)
+  group: Role        # what daily charts and the summary line split by (default: area); none = plain
+  detail: Role       # grouping for the folded breakdown in show: full (default: the full log's choice)
   week: last         # this | last | 2026-09-28 | 2026-W40 (default: from the note's filename)
   ```
   ````
@@ -38,6 +39,12 @@ Heuristic, no trained model. Each block is scored against open tasks (plus tasks
 - whether the task is scheduled that day / that week
 
 Anything that isn't confirmed is shown as *suggested* and goes into the review queue. Confirmed labels are stored in `data.json` and drive future suggestions.
+
+## Areas
+
+Every block also gets an **area**: a broad category for all your time (Work, Meals, Exercise, Personal, Social, Rest by default). Areas aren't tags. They're predicted from the block's title ("lunch", "gym"), its tags, similar blocks you sorted before, and a default for task work, and you confirm or change them in review (area buttons) or in the blocks table (Area column). Daily charts and the timeline are coloured by area, so they stay readable and add up to all the hours you logged, meals and exercise included.
+
+Edit them under Settings → *Areas*, one per line: `Work: meeting, writing, #postdoc, #faculty`. Plain words match block titles; `#tags` count any block carrying that tag. Up to 8; the order sets the colours.
 
 ## Tag groupings
 

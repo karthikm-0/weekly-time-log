@@ -21,6 +21,18 @@ const DEFAULTS = {
   exportFolder: 'Time Logs',
   // One grouping per line, e.g. "Role: postdoc (uist2026, chi2026), faculty"
   tagGroups: '',
+  // Broad life areas, predicted for every block (not tags). One per line:
+  // "Area: hint words, #tags". Order sets the chart colours.
+  areas: [
+    'Work: meeting, sync, writing, email, review, lecture, grading, research',
+    'Meals: lunch, dinner, breakfast, brunch, coffee, eat',
+    'Exercise: gym, run, workout, yoga, walk, swim, climb, bike',
+    'Personal: errands, groceries, doctor, appointment, family, chores',
+    'Social: drinks, party, friends, hangout',
+    'Rest: nap, break, rest',
+  ].join('\n'),
+  defaultTaskArea: 'Work', // area for blocks attached to a task when nothing else says otherwise
+  areaLabels: {},          // blockKey -> { area, title, tags }: confirmed areas, also training data
   view: null,            // last grouping picked in the full log
   minScore: 0.55,
   autoExport: true,      // save last week's CSV daily, and re-save after reviewing
@@ -295,9 +307,27 @@ function tagValue(tags, group) {
   return null;
 }
 
-/** The ways the charts can be grouped: each tag group, then Tag, Task, Calendar. */
+/** "Work: meeting, writing, #postdoc" -> { name, words, tags }, at most 8 (one colour each). */
+function parseAreas(text) {
+  const out = [];
+  for (const line of (text || '').split('\n')) {
+    const i = line.indexOf(':');
+    const name = (i < 0 ? line : line.slice(0, i)).trim();
+    if (!name || out.some(a => a.name.toLowerCase() === name.toLowerCase())) continue;
+    const parts = i < 0 ? [] : line.slice(i + 1).split(',').map(x => x.trim()).filter(Boolean);
+    out.push({
+      name,
+      tags: parts.filter(x => x.startsWith('#')).map(x => x.slice(1).toLowerCase()),
+      words: [...new Set(parts.filter(x => !x.startsWith('#')).flatMap(tokens))],
+    });
+  }
+  return out.slice(0, 8);
+}
+
+/** The ways the charts can be grouped: Area, each tag group, then Tag, Task, Calendar. */
 function dimensions(settings) {
   return [
+    { id: 'area', label: 'Area' },
     ...parseTagGroups(settings.tagGroups).map(g => ({ id: `group:${g.name}`, label: g.name, group: g })),
     { id: 'tag', label: 'Tag' },
     { id: 'task', label: 'Task' },
@@ -349,7 +379,9 @@ function buildTree(blocks, dim) {
       continue;
     }
     let g0;
-    if (dim.id === 'calendar') {
+    if (dim.id === 'area') {
+      g0 = b.area ? { key: b.area, label: b.area } : { key: '~', label: 'Unsorted', muted: true };
+    } else if (dim.id === 'calendar') {
       g0 = { key: b.calendarId, label: b.calendar };
     } else {
       const v = tagValue(b.tags, dim.group);
@@ -507,6 +539,8 @@ function furthestSlot(free, onScreen, theme) {
  * gives each half its hours. "Not task work" is left out of the coloured charts.
  */
 function blockCategories(b, dim) {
+  // Areas cover all your time (meals, gym...), so nothing is left out there.
+  if (dim.id === 'area') return [b.area ? { key: b.area, label: b.area, share: 1 } : { key: '~', label: 'Unsorted', share: 1 }];
   if (isOther(b)) return [];
   if (dim.id === 'tag') {
     const tags = [...new Set(b.tags)];
@@ -535,6 +569,7 @@ function categoryDays(report, color) {
       }
     }
   }
+  for (const d of days) d.shown = [...d.cats.values()].reduce((a, h) => a + h, 0);
   const folded = [...week.keys()].filter(k => !hasColor(color, k));
   const otherLabel = folded.length === 1 ? labels.get(folded[0]) : 'Other';
   // Legend order = stack order = slot order; grey bucket last.
@@ -571,6 +606,14 @@ function fmtHours1(h) {
 /** Hours per day as columns: plain (work + "not task work"), or stacked by category. */
 function renderDays(container, report, tip, color = null) {
   const days = dayRows(report);
+  if (color && color.dim.id === 'area') {
+    const total = days.reduce((a, d) => a + d.total, 0);
+    const active = days.filter(d => d.total > 0);
+    const parts = [`${fmtHours(total)} h logged`];
+    if (active.length) parts.push(`${fmtHours(total / active.length)} h a day on average`);
+    container.createDiv({ cls: 'wtl-days-summary', text: parts.join(' · ') });
+    return renderCategoryDays(container, report, tip, color, moment().format('YYYY-MM-DD'));
+  }
   const work = days.reduce((a, d) => a + d.work, 0);
   const active = days.filter(d => d.work > 0);
   const busiest = active.reduce((a, d) => (!a || d.work > a.work ? d : a), null);
@@ -604,11 +647,12 @@ function renderDays(container, report, tip, color = null) {
 
 function renderCategoryDays(container, report, tip, color, today) {
   const { days, series } = categoryDays(report, color);
-  const max = Math.max(1, ...days.map(d => d.work));
+  const all = color.dim.id === 'area';
+  const max = Math.max(1, ...days.map(d => d.shown));
   const cols = container.createDiv({ cls: 'wtl-days' });
   for (const d of days) {
-    const col = cols.createDiv({ cls: 'wtl-day' + (d.iso === today ? ' is-today' : '') + (d.work ? '' : ' is-empty') });
-    col.createDiv({ cls: 'wtl-day-value', text: d.work ? fmtHours(d.work) : '' });
+    const col = cols.createDiv({ cls: 'wtl-day' + (d.iso === today ? ' is-today' : '') + (d.shown ? '' : ' is-empty') });
+    col.createDiv({ cls: 'wtl-day-value', text: d.shown ? fmtHours(d.shown) : '' });
     const track = col.createDiv({ cls: 'wtl-day-track' });
     const segs = series.filter(sr => d.cats.get(sr.key));
     segs.forEach((sr, i) => {
@@ -618,9 +662,9 @@ function renderCategoryDays(container, report, tip, color, today) {
     });
     col.createDiv({ cls: 'wtl-day-label', text: d.day.format('ddd') });
     col.createDiv({ cls: 'wtl-day-sub', text: d.day.format('D') });
-    const lines = [d.day.format('ddd MMM D'), `${d.work.toFixed(2)} h work`];
+    const lines = [d.day.format('ddd MMM D'), `${d.shown.toFixed(2)} h${all ? '' : ' work'}`];
     for (const sr of [...segs].reverse()) lines.push(`  ${sr.label}  ${d.cats.get(sr.key).toFixed(2)} h`);
-    if (d.other) lines.push(`not task work ${d.other.toFixed(2)} h (not shown)`);
+    if (d.other && !all) lines.push(`not task work ${d.other.toFixed(2)} h (not shown)`);
     tip(col, lines.join('\n'));
   }
   // Legend doubles as the labels: colour plus the week's hours as text.
@@ -632,7 +676,7 @@ function renderCategoryDays(container, report, tip, color, today) {
     it.createSpan({ cls: 'wtl-legend-value', text: `${fmtHours1(sr.hours)} h` });
     if (sr.folded && sr.folded.length > 1) it.setAttr('aria-label', sr.folded.join(', '));
   }
-  const hidden = days.reduce((a, d) => a + d.other, 0);
+  const hidden = all ? 0 : days.reduce((a, d) => a + d.other, 0);
   const notes = [];
   if (hidden) notes.push(`Not task work (${fmtHours1(hidden)} h) isn't shown.`);
   if (color.dim.id === 'tag' && report.blocks.some(b => b.tags.length > 1)) notes.push('Blocks with several tags are split evenly between them.');
@@ -678,8 +722,9 @@ function renderTimeline(container, report, tip, color = null) {
     for (const b of d.blocks) {
       const s0 = hourOf(b.start);
       const e0 = b.end.isSame(b.start, 'day') ? hourOf(b.end) : 24;
-      const rect = track.createDiv({ cls: 'wtl-tl-block' + (isOther(b) ? ' is-other' : '') });
-      if (color && !isOther(b)) {
+      const byArea = color && color.dim.id === 'area';
+      const rect = track.createDiv({ cls: 'wtl-tl-block' + (isOther(b) && !byArea ? ' is-other' : '') });
+      if (color && (byArea || !isOther(b))) {
         // Coloured by its largest category (first, for an even split).
         const cats = blockCategories(b, color.dim);
         paint(rect, color, cats.length && hasColor(color, cats[0].key) ? cats[0].key : '~other');
@@ -687,9 +732,11 @@ function renderTimeline(container, report, tip, color = null) {
       rect.style.left = pct(s0);
       rect.style.width = `${((e0 - s0) / span) * 100}%`;
       const label = b.choice ? choiceLabel(b.choice) : 'Unattached';
-      tip(rect, `${b.title}\n${b.start.format('ddd h:mm')}–${b.end.format('h:mma')} · ${fmtHours(b.hours)} h\n${label}`);
+      const area = b.area ? `\n${b.area}${b.areaStatus === 'confirmed' ? '' : ' (suggested)'}` : '';
+      tip(rect, `${b.title}\n${b.start.format('ddd h:mm')}–${b.end.format('h:mma')} · ${fmtHours(b.hours)} h\n${label}${area}`);
     }
-    row.createDiv({ cls: 'wtl-tl-total', text: d.work ? `${fmtHours(d.work)} h` : '' });
+    const rowTotal = color && color.dim.id === 'area' ? d.total : d.work;
+    row.createDiv({ cls: 'wtl-tl-total', text: rowTotal ? `${fmtHours(rowTotal)} h` : '' });
   }
   if (color) {
     const { series } = categoryDays(report, color);
@@ -699,7 +746,7 @@ function renderTimeline(container, report, tip, color = null) {
       paint(it.createSpan({ cls: 'wtl-swatch' }), color, sr.key);
       it.createSpan({ text: sr.label });
     }
-    if (report.blocks.some(isOther)) {
+    if (color.dim.id !== 'area' && report.blocks.some(isOther)) {
       const it = lg.createSpan({ cls: 'wtl-legend-item' });
       it.createSpan({ cls: 'wtl-swatch is-other is-outline' });
       it.createSpan({ text: 'Not task work' });
@@ -1365,7 +1412,100 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
   rescore(report) {
     this.scoreBlocks(report);
-    return this.assign(report);
+    this.assign(report);
+    return this.assignAreas(report);
+  }
+
+  // ---- Areas ---------------------------------------------------------------
+
+  /**
+   * Each block's area: what you confirmed, else a prediction from (strongest wins)
+   * the area's #tags, similar blocks you sorted, words like "lunch"/"gym",
+   * tags you usually sort into an area, and a default for task work.
+   */
+  assignAreas(report) {
+    const areas = parseAreas(this.settings.areas);
+    const names = new Map(areas.map(a => [a.name.toLowerCase(), a.name]));
+    const entries = Object.entries(this.settings.areaLabels || {}).map(([key, e]) => ({
+      key, ...e, tokens: uniqTokens(e.title), norm: norm(e.title),
+    }));
+    const tagAreas = new Map(); // tag -> Map(area -> count)
+    for (const e of entries) {
+      for (const tg of e.tags || []) {
+        const k = tg.toLowerCase();
+        if (!tagAreas.has(k)) tagAreas.set(k, new Map());
+        bump(tagAreas.get(k), e.area, 1);
+      }
+    }
+    const defaultArea = names.get((this.settings.defaultTaskArea || '').toLowerCase()) || null;
+
+    for (const b of report.blocks) {
+      const confirmed = (this.settings.areaLabels || {})[b.key];
+      if (confirmed && names.has(confirmed.area.toLowerCase())) {
+        b.area = names.get(confirmed.area.toLowerCase());
+        b.areaStatus = 'confirmed';
+        b.areaWhy = [];
+        continue;
+      }
+      const votes = new Map();
+      const offer = (area, p, why) => {
+        const cur = votes.get(area);
+        if (!cur || p > cur.p) votes.set(area, { p, why });
+      };
+      const bTokens = uniqTokens(b.title);
+      const bNorm = norm(b.title);
+      const lowerTags = b.tags.map(t => t.toLowerCase());
+
+      for (const a of areas) {
+        const tg = lowerTags.find(t => a.tags.some(x => t === x || t.startsWith(x + '/')));
+        if (tg) offer(a.name, 0.95, `#${tg} is listed under ${a.name}`);
+      }
+      const hist = new Map();
+      let total = 0;
+      let n = 0;
+      for (const e of entries) {
+        if (e.key === b.key || !e.tokens.length) continue;
+        const sim = e.norm === bNorm ? 1 : similarity(bTokens, e.tokens);
+        if (sim < HISTORY_SIM_MIN) continue;
+        total += sim;
+        n++;
+        bump(hist, e.area, sim);
+      }
+      for (const [area, w] of hist) offer(area, 0.9 * (w / total), `you put ${plural(n, 'similar block')} in ${area}`);
+      for (const a of areas) {
+        const hit = a.words.find(w => bTokens.some(x => sameWord(w, x)));
+        if (hit) offer(a.name, 0.8, `"${hit}" sounds like ${a.name}`);
+      }
+      for (const t of lowerTags) {
+        const counts = tagAreas.get(t);
+        if (!counts) continue;
+        const sum = [...counts.values()].reduce((x, y) => x + y, 0);
+        for (const [area, c] of counts) offer(area, 0.75 * (c / sum), `#${t} is usually ${area} for you`);
+      }
+      if (!votes.size && defaultArea && (b.tasks.length || b.tags.length)) offer(defaultArea, 0.55, 'attached to a task');
+
+      let best = null;
+      for (const [area, v] of votes) if (names.has(area.toLowerCase()) && (!best || v.p > best.p)) best = { area, ...v };
+      if (best && best.p >= 0.5) {
+        b.area = names.get(best.area.toLowerCase());
+        b.areaStatus = 'suggested';
+        b.areaWhy = [best.why];
+      } else {
+        b.area = null;
+        b.areaStatus = 'open';
+        b.areaWhy = [];
+      }
+    }
+    return report;
+  }
+
+  async setArea(report, block, area) {
+    this.settings.areaLabels = this.settings.areaLabels || {};
+    if (!area) delete this.settings.areaLabels[block.key];
+    else this.settings.areaLabels[block.key] = { area, title: block.title, tags: block.tags };
+    await this.saveSettings();
+    this.assignAreas(report);
+    this.refreshBlocks();
   }
 
   async annotate(report, block, choice) {
@@ -1412,6 +1552,12 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     if (!dim || dim.id === 'none') return null;
     const slots = new Map();
     const custom = new Map();
+    if (dim.id === 'area') {
+      // Areas take palette colours in their listed order: consecutive slots are the
+      // validated neighbour pairs, so a stack of areas stays easy to tell apart.
+      parseAreas(this.settings.areas).forEach((a, i) => slots.set(a.name, i + 1));
+      return { dim, slots, custom };
+    }
     const theme = typeof document !== 'undefined' && document.body.classList.contains('theme-dark') ? 'dark' : 'light';
     if (dim.group) {
       for (const v of dim.group.values) {
@@ -1517,7 +1663,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
   toCsv(report) {
     const groups = parseTagGroups(this.settings.tagGroups);
     const header = ['week_start', 'date', 'weekday', 'start', 'end', 'hours', 'block', 'calendar',
-      'label', 'task', 'task_file', 'tags', ...groups.map(g => g.name.toLowerCase()),
+      'area', 'area_status', 'label', 'task', 'task_file', 'tags', ...groups.map(g => g.name.toLowerCase()),
       'task_scheduled', 'task_due', 'task_done', 'status', 'confidence', 'why'];
     const rows = report.blocks.map(b => {
       // Several tasks: '; '-separated, in the same order in every task_* column.
@@ -1526,7 +1672,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       return [
         report.start.format('YYYY-MM-DD'), b.date, b.start.format('ddd'),
         b.start.format('HH:mm'), b.end.format('HH:mm'), b.hours.toFixed(2), b.title, b.calendar,
-        b.choice ? b.choice.kind : '', col(t => t.desc), col(t => t.path || ''), b.tags.map(x => '#' + x).join(' '),
+        b.area || '', b.area ? b.areaStatus : '', b.choice ? b.choice.kind : '', col(t => t.desc), col(t => t.path || ''), b.tags.map(x => '#' + x).join(' '),
         ...groups.map(g => tagValue(b.tags, g) || ''),
         col(t => t.scheduled || ''), col(t => t.due || ''), col(t => (t.done ? 'yes' : 'no')),
         b.status,
@@ -1893,8 +2039,11 @@ class TimeLogView extends ItemView {
 
   async acceptAll() {
     // Snapshot first: each confirmation re-scores the rest of the week.
-    const pending = this.report.blocks.filter(b => b.status === 'suggested').map(b => [b, b.suggestion]);
-    for (const [b, s] of pending) await this.plugin.annotate(this.report, b, s);
+    const pending = this.report.blocks.filter(b => b.status === 'suggested').map(b => [b, b.suggestion, b.areaStatus === 'suggested' ? b.area : null]);
+    for (const [b, s, area] of pending) {
+      await this.plugin.annotate(this.report, b, s);
+      if (area) await this.plugin.setArea(this.report, b, area);
+    }
     new Notice(`Confirmed ${plural(pending.length, 'suggestion')}.`);
     this.rerender(true);
     this.scheduleSave();
@@ -2015,7 +2164,8 @@ class TimeLogView extends ItemView {
   }
 
   currentColors(report) {
-    return this.plugin.colorsFor(report, findDimension(this.plugin.settings, this.plugin.settings.view));
+    // Daily views always show areas: a handful of colours, and every hour counts.
+    return this.plugin.colorsFor(report, findDimension(this.plugin.settings, 'area'));
   }
 
   renderByDay(card, report) {
@@ -2040,7 +2190,8 @@ class TimeLogView extends ItemView {
     const wrap = card.createDiv({ cls: 'wtl-table-wrap' });
     const table = wrap.createEl('table', { cls: 'wtl-table' });
     const tr0 = table.createEl('thead').createEl('tr');
-    for (const h of ['Day', 'Time', 'Block', 'Hours', 'Label', 'Status']) tr0.createEl('th', { text: h });
+    for (const h of ['Day', 'Time', 'Block', 'Hours', 'Area', 'Label', 'Status']) tr0.createEl('th', { text: h });
+    const areaNames = parseAreas(this.plugin.settings.areas).map(a => a.name);
     const body = table.createEl('tbody');
 
     for (const b of report.blocks) {
@@ -2049,6 +2200,19 @@ class TimeLogView extends ItemView {
       tr.createEl('td', { text: `${b.start.format('h:mm')}–${b.end.format('h:mma')}` });
       tr.createEl('td', { text: b.title });
       tr.createEl('td', { text: fmtHours(b.hours), cls: 'wtl-num' });
+
+      // Area: a short fixed list, so a plain dropdown. Suggested areas show in italics.
+      const ac = tr.createEl('td', { cls: 'wtl-area-cell' });
+      const sel = ac.createEl('select', { cls: 'dropdown wtl-area-select' + (b.areaStatus === 'confirmed' ? '' : ' is-pending') });
+      sel.createEl('option', { text: 'Unsorted', value: '' });
+      for (const n of areaNames) sel.createEl('option', { text: n, value: n });
+      sel.value = b.area || '';
+      if (b.areaWhy && b.areaWhy.length) sel.setAttr('aria-label', `Suggested: ${b.areaWhy.join('; ')}`);
+      sel.onchange = async () => {
+        await this.plugin.setArea(report, b, sel.value || null);
+        this.rerender(true);
+        this.scheduleSave();
+      };
 
       const cell = tr.createEl('td', { cls: 'wtl-label-cell' });
       new LabelPicker(this.app, cell, labelItems(report, b), b.choice, async choice => {
@@ -2073,7 +2237,9 @@ class TimeLogView extends ItemView {
         const ok = st.createEl('button', { cls: 'wtl-accept', text: '✓' });
         ok.setAttr('aria-label', 'Accept suggestion');
         ok.onclick = async () => {
+          const area = b.areaStatus === 'suggested' ? b.area : null;
           await this.plugin.annotate(report, b, b.suggestion);
+          if (area) await this.plugin.setArea(report, b, area);
           this.rerender(true);
           this.scheduleSave();
         };
@@ -2187,8 +2353,13 @@ class TimeLogBlock extends MarkdownRenderChild {
       el.createDiv({ cls: 'wtl-muted', text: 'Time log: waiting for your calendar to load…' });
       return;
     }
-    const dim = findDimension(this.plugin.settings, this.opts.group || this.plugin.settings.view);
-    if (show === 'hours') return this.renderHours(report, dim);
+    const settings = this.plugin.settings;
+    const areaDim = findDimension(settings, 'area');
+    // Daily charts and the one-line summary go by Area unless the block says otherwise;
+    // the detailed breakdown uses the grouping picked in the full log.
+    const chartDim = this.opts.group ? findDimension(settings, this.opts.group) : areaDim;
+    const dim = findDimension(settings, this.opts.group || this.opts.detail || settings.view);
+    if (show === 'hours') return this.renderHours(report, chartDim);
 
     const head = el.createDiv({ cls: 'wtl-block-head' });
     head.createSpan({ cls: 'wtl-block-title', text: 'Time log' });
@@ -2199,7 +2370,7 @@ class TimeLogBlock extends MarkdownRenderChild {
 
     const nativeTip = (node, text) => node.setAttr('aria-label', text);
     // group: none = plain single-colour daily charts
-    const color = (this.opts.group || '').toLowerCase() === 'none' ? null : this.plugin.colorsFor(report, dim);
+    const color = (this.opts.group || '').toLowerCase() === 'none' ? null : this.plugin.colorsFor(report, chartDim);
     if (show === 'days') return renderDays(el, report, nativeTip, color);
     if (show === 'timeline') return renderTimeline(el, report, nativeTip, color);
 
@@ -2217,15 +2388,25 @@ class TimeLogBlock extends MarkdownRenderChild {
     stat(String(pending), 'to review');
 
     if (show === 'full' && report.blocks.length) {
-      el.createDiv({ cls: 'wtl-block-sub', text: color ? `By day, by ${dim.label.toLowerCase()}` : 'By day' });
+      el.createDiv({ cls: 'wtl-block-sub', text: color ? `By day, by ${chartDim.label.toLowerCase()}` : 'By day' });
       renderDays(el, report, nativeTip, color);
     }
 
-    // Grouped bars (collapsed; click a group to see its tasks)
+    // Grouped bars (click a group to see its tasks). In the full layout they're
+    // folded away under "Details" so the area chart stays the headline.
     if (report.blocks.length) {
-      el.createDiv({ cls: 'wtl-block-sub', text: `By ${dim.label.toLowerCase()}` });
+      let host = el;
+      if (show === 'full') {
+        const det = el.createEl('details', { cls: 'wtl-details' });
+        det.open = !!this.detailsOpen;
+        det.addEventListener('toggle', () => { this.detailsOpen = det.open; });
+        det.createEl('summary', { text: `Details by ${dim.label.toLowerCase()}` });
+        host = det;
+      } else {
+        el.createDiv({ cls: 'wtl-block-sub', text: `By ${dim.label.toLowerCase()}` });
+      }
       this.expanded = this.expanded || new Set();
-      renderTree(el, buildTree(report.blocks, dim), {
+      renderTree(host, buildTree(report.blocks, dim), {
         isOpen: k => this.expanded.has(k),
         toggle: k => { if (this.expanded.has(k)) this.expanded.delete(k); else this.expanded.add(k); },
         tip: (row, text) => row.setAttr('aria-label', text),
@@ -2338,6 +2519,31 @@ class ReviewModal extends Modal {
     });
     if (b.description) card.createDiv({ cls: 'wtl-review-desc', text: b.description.slice(0, 240) });
 
+    // Area, saved together with whatever label you pick below.
+    if (this.areaFor !== b.key) {
+      this.areaFor = b.key;
+      this.area = b.area || null;
+    }
+    const areas = parseAreas(this.plugin.settings.areas);
+    const areaColor = this.plugin.colorsFor(this.report, findDimension(this.plugin.settings, 'area'));
+    const row = el.createDiv({ cls: 'wtl-area-row' });
+    row.createSpan({ cls: 'wtl-area-row-label', text: 'Area' });
+    const areaBtns = [];
+    for (const a of areas) {
+      const btn = row.createEl('button', { cls: 'wtl-area-btn' });
+      paint(btn.createSpan({ cls: 'wtl-swatch' }), areaColor, a.name);
+      btn.createSpan({ text: a.name });
+      areaBtns.push([btn, a.name]);
+      btn.onclick = () => {
+        this.area = this.area === a.name ? null : a.name;
+        for (const [x, n] of areaBtns) x.toggleClass('is-active', n === this.area);
+      };
+    }
+    for (const [x, n] of areaBtns) x.toggleClass('is-active', n === this.area);
+    if (b.areaStatus === 'suggested' && b.areaWhy.length) {
+      el.createDiv({ cls: 'wtl-review-why wtl-area-why', text: `Area suggested: ${b.areaWhy.join(' · ')}` });
+    }
+
     // Options: suggestion first, then other task candidates, then tag-only.
     const choices = [];
     const seen = new Set();
@@ -2407,7 +2613,9 @@ class ReviewModal extends Modal {
   }
 
   async choose(choice) {
-    await this.plugin.annotate(this.report, this.current(), choice);
+    const b = this.current();
+    await this.plugin.annotate(this.report, b, choice);
+    if (this.area) await this.plugin.setArea(this.report, b, this.area);
     this.next();
   }
 
@@ -2468,6 +2676,27 @@ class TimeLogSettings extends PluginSettingTab {
       .setName('CSV export folder')
       .addText(t => t.setValue(s.exportFolder).onChange(async v => { s.exportFolder = v.trim() || 'Time Logs'; await this.plugin.saveSettings(); }));
 
+    const ar = new Setting(containerEl)
+      .setName('Areas')
+      .setDesc('Broad categories for all your time, predicted for every block (not tags). One per line: ' +
+        '"Area: hint words, #tags". Hint words match block titles; #tags count blocks with that tag. ' +
+        'Up to 8; the order sets their chart colours.')
+      .addTextArea(t => {
+        t.setValue(s.areas || '').onChange(async v => { s.areas = v; await this.plugin.saveSettings(); });
+        t.inputEl.rows = 7;
+        t.inputEl.addClass('wtl-groups-input');
+      });
+    ar.settingEl.addClass('wtl-setting-wide');
+
+    new Setting(containerEl)
+      .setName('Area for task work')
+      .setDesc('Used for blocks attached to a task or tag when nothing else points to an area.')
+      .addDropdown(d => {
+        d.addOption('', 'None (leave unsorted)');
+        for (const a of parseAreas(s.areas)) d.addOption(a.name, a.name);
+        d.setValue(s.defaultTaskArea || '').onChange(async v => { s.defaultTaskArea = v; await this.plugin.saveSettings(); });
+      });
+
     const tg = new Setting(containerEl)
       .setName('Tag groupings')
       .setDesc('One per line. Each becomes a chart view and a CSV column. ' +
@@ -2511,10 +2740,12 @@ class TimeLogSettings extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Forget learned labels')
-      .setDesc(`${plural(Object.keys(s.annotations).length, 'confirmed block')} used to make suggestions.`)
+      .setDesc(`${plural(Object.keys(s.annotations).length, 'confirmed label')} and ` +
+        `${plural(Object.keys(s.areaLabels || {}).length, 'confirmed area')} used to make suggestions.`)
       .addButton(b => b.setButtonText('Reset').setWarning().onClick(async () => {
-        if (!window.confirm('Forget every confirmed label? Suggestions will start from scratch.')) return;
+        if (!window.confirm('Forget every confirmed label and area? Suggestions will start from scratch.')) return;
         s.annotations = {};
+        s.areaLabels = {};
         await this.plugin.saveSettings();
         this.display();
       }));
