@@ -2317,6 +2317,7 @@ class TimeLogView extends ItemView {
 //   week: this | last | 2026-09-28 | 2026-W40   (default: from the note's filename, else this week)
 //   group: Project | Role | tag | task | calendar | none   (default: last view picked in the full log)
 //   show: full | chart | hours | days | timeline (default: full)
+//   buttons: false                               (hide Review / Export / Open full log)
 
 /**
  * Returns { anchor } for dates / this / last, { year, week } for week numbers
@@ -2419,12 +2420,15 @@ class TimeLogBlock extends MarkdownRenderChild {
     const nativeTip = (node, text) => node.setAttr('aria-label', text);
     // group: none = plain single-colour daily charts
     const color = (this.opts.group || '').toLowerCase() === 'none' ? null : this.plugin.colorsFor(report, chartDim);
-    if (show === 'days') return renderDays(el, report, nativeTip, color);
+    if (show === 'days') {
+      renderDays(el, report, nativeTip, color);
+      return this.renderFoot(report, path);
+    }
     this.breakdown = this.breakdown || { dim: this.opts.detail || null };
     if (show === 'timeline') {
       renderTimeline(el, report, nativeTip, color);
       if (report.blocks.length) renderBreakdown(el, report, settings, this.breakdown, { colorsFor: d => this.plugin.colorsFor(report, d) });
-      return;
+      return this.renderFoot(report, path);
     }
 
     const total = report.blocks.reduce((a, b) => a + b.hours, 0);
@@ -2463,8 +2467,18 @@ class TimeLogBlock extends MarkdownRenderChild {
       el.createDiv({ cls: 'wtl-muted', text: this.plugin.calendarSettled() ? 'No calendar blocks this week.' : 'Waiting for your calendar to load…' });
     }
 
-    if (show === 'chart') return;
-    const foot = el.createDiv({ cls: 'wtl-block-foot' });
+    this.renderFoot(report, path);
+  }
+
+  showButtons() {
+    return String(this.opts.buttons || '').toLowerCase() !== 'false';
+  }
+
+  /** Review / Export CSV / Open full log, under every layout (unless "buttons: false"). */
+  renderFoot(report, path) {
+    if (!this.showButtons()) return;
+    const pending = report.blocks.filter(needsReview).length;
+    const foot = this.containerEl.createDiv({ cls: 'wtl-block-foot' });
     if (pending) {
       foot.createEl('button', { text: `Review ${pending}`, cls: 'mod-cta' }).onclick = () =>
         this.plugin.openReview(report, () => this.render());
@@ -2493,16 +2507,17 @@ class TimeLogBlock extends MarkdownRenderChild {
     const groups = buildTree(report.blocks, dim).filter(g => !g.muted).slice(0, 4);
     for (const g of groups) {
       el.createSpan({ cls: 'wtl-muted', text: ' · ' });
-      el.createSpan({ text: `${fmtHours(g.hours)} h ${g.label}` });
+      el.createSpan({ text: `${fmtHours1(g.hours)} h ${g.label}` });
     }
-    if (pending) {
+    if (!this.showButtons()) return;
+    const link = (text, fn) => {
       el.createSpan({ cls: 'wtl-muted', text: ' · ' });
-      const link = el.createEl('a', { text: `${pending} to review`, href: '#' });
-      link.onclick = e => {
-        e.preventDefault();
-        this.plugin.openReview(report, () => this.render());
-      };
-    }
+      const a = el.createEl('a', { text, href: '#', cls: 'wtl-line-link' });
+      a.onclick = e => { e.preventDefault(); fn(); };
+    };
+    if (pending) link(`review ${pending}`, () => this.plugin.openReview(report, () => this.render()));
+    link('export', async () => { await this.plugin.exportCsv(report); this.render(); });
+    link('open log', () => this.plugin.openView(report.start));
   }
 }
 

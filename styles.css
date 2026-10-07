@@ -322,3 +322,6 @@ body.theme-dark {
 .wtl-details > summary::before { content: '▸'; color: var(--text-faint); transition: transform 120ms ease; display: inline-block; }
 .wtl-details[open] > summary::before { transform: rotate(90deg); }
 .wtl-breakdown-seg { margin: 4px 0 8px; width: fit-content; }
+
+.wtl-line-link { color: var(--text-muted); font-size: var(--font-ui-small); }
+.wtl-line-link:hover { color: var(--text-accent); }
