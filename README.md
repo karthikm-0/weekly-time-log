@@ -44,6 +44,8 @@ Anything that isn't confirmed is shown as *suggested* and goes into the review q
 
 Every block also gets an **area**: a broad category for all your time (Work, Meals, Exercise, Personal, Social, Rest by default). Areas aren't tags. They're predicted from the block's title ("lunch", "gym"), its tags, similar blocks you sorted before, and a default for task work, and you confirm or change them in review (area buttons) or in the blocks table (Area column). Daily charts and the timeline are coloured by area, so they stay readable and add up to all the hours you logged, meals and exercise included.
 
+Review covers areas too: blocks whose area isn't confirmed come up even if their label is (option 1 keeps the label), and Shift+1…8 picks an area. The timeline shows each area's hours, with a ▸ Breakdown toggle to split the week by area, grouping, tag, task or calendar.
+
 Edit them under Settings → *Areas*, one per line: `Work: meeting, writing, #postdoc, #faculty`. Plain words match block titles; `#tags` count any block carrying that tag. Up to 8; the order sets the colours.
 
 ## Tag groupings

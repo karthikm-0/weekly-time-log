@@ -397,7 +397,7 @@ function buildTree(blocks, dim) {
  * Horizontal bars with expandable children. Child bars share the parent scale,
  * so a task's bar shows its share of the group.
  */
-function renderTree(container, rows, { isOpen, toggle, tip, openTask }) {
+function renderTree(container, rows, { isOpen, toggle, tip, openTask, color = null }) {
   const max = Math.max(...rows.map(r => r.hours), 0.0001);
   const list = container.createDiv({ cls: 'wtl-hbars' });
   const bar = (row, r, cls) => {
@@ -409,7 +409,8 @@ function renderTree(container, rows, { isOpen, toggle, tip, openTask }) {
     }
     const fill = row.createDiv({ cls: 'wtl-hbar-track' }).createDiv({ cls: `wtl-hbar ${cls}${r.muted ? ' is-muted' : ''}` });
     fill.style.width = `${(r.hours / max) * 100}%`;
-    row.createDiv({ cls: 'wtl-hbar-value', text: `${fmtHours(r.hours)} h` });
+    if (color && cls === '' && !r.muted && hasColor(color, r.key)) paint(fill, color, r.key);
+    row.createDiv({ cls: 'wtl-hbar-value', text: `${fmtHours1(r.hours)} h` });
     const pend = r.unconfirmed ? `\n${r.unconfirmed.toFixed(2)} h not yet confirmed` : '';
     tip(row, `${r.label}\n${r.hours.toFixed(2)} h · ${plural(r.n, 'block')}${pend}`);
     return label;
@@ -446,6 +447,8 @@ function renderTree(container, rows, { isOpen, toggle, tip, openTask }) {
 // Daily views: columns (how much) and timeline (when)
 
 const sumHours = bs => bs.reduce((a, b) => a + b.hours, 0);
+/** A block is reviewed once both its label and its area are confirmed. */
+const needsReview = b => b.status !== 'confirmed' || b.areaStatus !== 'confirmed';
 const isOther = b => !!(b.choice && b.choice.kind === 'none'); // "Not task work"
 
 function dayRows(report) {
@@ -745,6 +748,7 @@ function renderTimeline(container, report, tip, color = null) {
       const it = lg.createSpan({ cls: 'wtl-legend-item' });
       paint(it.createSpan({ cls: 'wtl-swatch' }), color, sr.key);
       it.createSpan({ text: sr.label });
+      it.createSpan({ cls: 'wtl-legend-value', text: `${fmtHours1(sr.hours)} h` });
     }
     if (color.dim.id !== 'area' && report.blocks.some(isOther)) {
       const it = lg.createSpan({ cls: 'wtl-legend-item' });
@@ -754,6 +758,43 @@ function renderTimeline(container, report, tip, color = null) {
   } else if (report.blocks.some(isOther)) {
     legend(container, [['', 'Work'], ['is-other', 'Not task work']]);
   }
+}
+
+/**
+ * "▸ Breakdown": a folded section with a switcher (Area, groupings, Tag, Task,
+ * Calendar) and expandable bars. `state` keeps open/dimension/expanded rows
+ * across redraws for whoever owns it.
+ */
+function renderBreakdown(host, report, settings, state, { tip, openTask, title = 'Breakdown', colorsFor = null } = {}) {
+  const det = host.createEl('details', { cls: 'wtl-details' });
+  det.open = !!state.open;
+  det.addEventListener('toggle', () => { state.open = det.open; });
+  det.createEl('summary', { text: title });
+  const seg = det.createDiv({ cls: 'wtl-seg wtl-breakdown-seg' });
+  const body = det.createDiv();
+  state.expanded = state.expanded || new Set();
+  const draw = () => {
+    const dim = findDimension(settings, state.dim || 'area');
+    seg.empty();
+    for (const d of dimensions(settings)) {
+      const b = seg.createEl('button', { text: d.label, cls: d.id === dim.id ? 'is-active' : '' });
+      b.onclick = e => { e.preventDefault(); state.dim = d.id; draw(); };
+    }
+    body.empty();
+    renderTree(body, buildTree(report.blocks, dim), {
+      isOpen: k => state.expanded.has(`${dim.id}|${k}`),
+      toggle: k => {
+        const key = `${dim.id}|${k}`;
+        if (state.expanded.has(key)) state.expanded.delete(key); else state.expanded.add(key);
+      },
+      tip: tip || ((row, text) => row.setAttr('aria-label', text)),
+      openTask,
+      // Group bars wear their area/tag colour, matching the charts above.
+      color: colorsFor ? colorsFor(dim) : null,
+    });
+  };
+  draw();
+  return det;
 }
 
 module.exports = class WeeklyTimeLogPlugin extends Plugin {
@@ -891,7 +932,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     }
     if (!report.blocks.length) return; // calendar may still be loading; never save an empty week
     if (s.autoExport) await this.exportCsv(report, { quiet: true });
-    const pending = report.blocks.filter(b => b.status !== 'confirmed').length;
+    const pending = report.blocks.filter(needsReview).length;
     if (pending && s.remind) this.remind(report, pending);
     s.lastCheck = today;
     await this.saveSettings();
@@ -1702,7 +1743,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       await this.app.vault.create(path, csv);
     }
     if (!quiet) {
-      const pending = report.blocks.filter(b => b.status !== 'confirmed').length;
+      const pending = report.blocks.filter(needsReview).length;
       new Notice(`Time log ${changed ? 'exported' : 'already up to date'}: ${path}` +
         (pending ? ` (${plural(pending, 'block')} not yet reviewed)` : ''));
     }
@@ -2066,7 +2107,7 @@ class TimeLogView extends ItemView {
     if (this.offset !== 0) btn('This week', () => { this.offset = 0; this.refresh(); });
     btn('Refresh', () => this.refresh());
     if (report) {
-      const pending = report.blocks.filter(b => b.status !== 'confirmed').length;
+      const pending = report.blocks.filter(needsReview).length;
       if (pending) btn(`Review ${pending}`, () => this.review(), 'mod-cta');
       btn('Export CSV', () => this.plugin.exportCsv(report));
     }
@@ -2094,9 +2135,10 @@ class TimeLogView extends ItemView {
     };
     tile('Total logged', `${fmtHours(total)} h`, plural(report.blocks.length, 'block'));
     tile('Confirmed', `${fmtHours(sum(confirmed))} h`, total ? `${Math.round((sum(confirmed) / total) * 100)}% of time` : '—');
-    const rev = tile('To review', String(suggested.length + open.length),
+    const toReview = report.blocks.filter(needsReview).length;
+    const rev = tile('To review', String(toReview),
       `${suggested.length} suggested · ${open.length} unattached`);
-    if (suggested.length + open.length) {
+    if (toReview) {
       rev.addClass('is-clickable');
       rev.onclick = () => this.review();
     }
@@ -2177,6 +2219,12 @@ class TimeLogView extends ItemView {
   renderTimelineCard(card, report) {
     card.createEl('h4', { text: 'When you worked' });
     renderTimeline(card, report, (el, text) => this.hover(el, text), this.currentColors(report));
+    this.timelineBreakdown = this.timelineBreakdown || {};
+    renderBreakdown(card, report, this.plugin.settings, this.timelineBreakdown, {
+      colorsFor: d => this.plugin.colorsFor(report, d),
+      tip: (el, text) => this.hover(el, text),
+      openTask: t => this.openTask(t),
+    });
   }
 
   renderTable(card, report) {
@@ -2372,11 +2420,16 @@ class TimeLogBlock extends MarkdownRenderChild {
     // group: none = plain single-colour daily charts
     const color = (this.opts.group || '').toLowerCase() === 'none' ? null : this.plugin.colorsFor(report, chartDim);
     if (show === 'days') return renderDays(el, report, nativeTip, color);
-    if (show === 'timeline') return renderTimeline(el, report, nativeTip, color);
+    this.breakdown = this.breakdown || { dim: this.opts.detail || null };
+    if (show === 'timeline') {
+      renderTimeline(el, report, nativeTip, color);
+      if (report.blocks.length) renderBreakdown(el, report, settings, this.breakdown, { colorsFor: d => this.plugin.colorsFor(report, d) });
+      return;
+    }
 
     const total = report.blocks.reduce((a, b) => a + b.hours, 0);
     const confirmed = report.blocks.filter(b => b.status === 'confirmed').reduce((a, b) => a + b.hours, 0);
-    const pending = report.blocks.filter(b => b.status !== 'confirmed').length;
+    const pending = report.blocks.filter(needsReview).length;
     const stats = show === 'chart' ? createDiv() : el.createDiv({ cls: 'wtl-block-stats' });
     const stat = (value, label) => {
       const d = stats.createDiv({ cls: 'wtl-block-stat' });
@@ -2392,21 +2445,16 @@ class TimeLogBlock extends MarkdownRenderChild {
       renderDays(el, report, nativeTip, color);
     }
 
-    // Grouped bars (click a group to see its tasks). In the full layout they're
-    // folded away under "Details" so the area chart stays the headline.
-    if (report.blocks.length) {
-      let host = el;
-      if (show === 'full') {
-        const det = el.createEl('details', { cls: 'wtl-details' });
-        det.open = !!this.detailsOpen;
-        det.addEventListener('toggle', () => { this.detailsOpen = det.open; });
-        det.createEl('summary', { text: `Details by ${dim.label.toLowerCase()}` });
-        host = det;
-      } else {
-        el.createDiv({ cls: 'wtl-block-sub', text: `By ${dim.label.toLowerCase()}` });
-      }
+    if (report.blocks.length && show === 'full') {
+      // Everything beyond areas is one click away.
+      renderBreakdown(el, report, settings, this.breakdown, {
+        title: 'Breakdown by area, tag, task…',
+        colorsFor: d => this.plugin.colorsFor(report, d),
+      });
+    } else if (report.blocks.length) {
+      el.createDiv({ cls: 'wtl-block-sub', text: `By ${dim.label.toLowerCase()}` });
       this.expanded = this.expanded || new Set();
-      renderTree(host, buildTree(report.blocks, dim), {
+      renderTree(el, buildTree(report.blocks, dim), {
         isOpen: k => this.expanded.has(k),
         toggle: k => { if (this.expanded.has(k)) this.expanded.delete(k); else this.expanded.add(k); },
         tip: (row, text) => row.setAttr('aria-label', text),
@@ -2439,7 +2487,7 @@ class TimeLogBlock extends MarkdownRenderChild {
     el.removeClass('wtl-block');
     el.addClass('wtl-block-line');
     const total = report.blocks.reduce((a, b) => a + b.hours, 0);
-    const pending = report.blocks.filter(b => b.status !== 'confirmed').length;
+    const pending = report.blocks.filter(needsReview).length;
     el.createSpan({ cls: 'wtl-line-total', text: `${fmtHours(total)} h` });
     el.createSpan({ text: ' logged' });
     const groups = buildTree(report.blocks, dim).filter(g => !g.muted).slice(0, 4);
@@ -2467,7 +2515,7 @@ class ReviewModal extends Modal {
     this.plugin = plugin;
     this.report = report;
     this.onDone = onDone;
-    this.queue = report.blocks.filter(b => b.status !== 'confirmed');
+    this.queue = report.blocks.filter(needsReview);
     this.i = 0;
     this.choices = [];
   }
@@ -2487,6 +2535,16 @@ class ReviewModal extends Modal {
     key('ArrowRight', () => this.next());
     key('ArrowLeft', () => this.prev());
     key('/', () => this.input && this.input.focus());
+    // Shift+1…8 picks an area (number keys alone pick a label).
+    this.modalEl.addEventListener('keydown', e => {
+      if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || !/^Digit[1-8]$/.test(e.code)) return;
+      if (this.input && document.activeElement === this.input) return;
+      const hit = (this.areaKeys || [])[Number(e.code.slice(5)) - 1];
+      if (!hit) return;
+      e.preventDefault();
+      e.stopPropagation();
+      hit[0].click();
+    }, true);
     this.render();
   }
 
@@ -2529,17 +2587,27 @@ class ReviewModal extends Modal {
     const row = el.createDiv({ cls: 'wtl-area-row' });
     row.createSpan({ cls: 'wtl-area-row-label', text: 'Area' });
     const areaBtns = [];
-    for (const a of areas) {
+    const sync = () => {
+      for (const [x, n] of areaBtns) {
+        x.toggleClass('is-active', n === this.area);
+        x.setAttr('aria-pressed', String(n === this.area));
+      }
+    };
+    areas.forEach((a, i) => {
       const btn = row.createEl('button', { cls: 'wtl-area-btn' });
+      btn.createSpan({ cls: 'wtl-area-check', text: '✓' });
       paint(btn.createSpan({ cls: 'wtl-swatch' }), areaColor, a.name);
       btn.createSpan({ text: a.name });
+      btn.createSpan({ cls: 'wtl-area-key', text: `⇧${i + 1}` });
       areaBtns.push([btn, a.name]);
-      btn.onclick = () => {
+      btn.onclick = e => {
+        e.preventDefault();
         this.area = this.area === a.name ? null : a.name;
-        for (const [x, n] of areaBtns) x.toggleClass('is-active', n === this.area);
+        sync();
       };
-    }
-    for (const [x, n] of areaBtns) x.toggleClass('is-active', n === this.area);
+    });
+    sync();
+    this.areaKeys = areaBtns; // Shift+1…8 (see onOpen)
     if (b.areaStatus === 'suggested' && b.areaWhy.length) {
       el.createDiv({ cls: 'wtl-review-why wtl-area-why', text: `Area suggested: ${b.areaWhy.join(' · ')}` });
     }
@@ -2547,13 +2615,16 @@ class ReviewModal extends Modal {
     // Options: suggestion first, then other task candidates, then tag-only.
     const choices = [];
     const seen = new Set();
-    const add = (choice, reasons, suggested) => {
+    const add = (choice, reasons, suggested, keep = false) => {
       const v = choiceValue(choice);
       if (seen.has(v)) return;
       seen.add(v);
-      choices.push({ choice, reasons, suggested });
+      choices.push({ choice, reasons, suggested, keep });
     };
-    if (b.suggestion && b.suggestion.kind !== 'none') add(b.suggestion, b.suggestion.reasons, true);
+    // Label already confirmed (here for its area): option 1 keeps it, so Enter just saves the area.
+    const keep = b.status === 'confirmed' ? b.choice : null;
+    if (keep) add(keep, ['your confirmed label'], true, true);
+    if (b.suggestion && b.suggestion.kind !== 'none') add(b.suggestion, b.suggestion.reasons, !keep);
     for (const c of b.candidates.slice(0, 4)) add({ kind: 'task', task: c.task }, c.reasons);
     for (const t of b.tagRank.slice(0, 2)) if (t.p >= 0.3) add({ kind: 'tag', tags: [t.tag] }, [t.why]);
     this.choices = choices;
@@ -2564,26 +2635,31 @@ class ReviewModal extends Modal {
       row.createSpan({ cls: 'wtl-key', text: String(idx + 1) });
       const main = row.createDiv({ cls: 'wtl-review-option-main' });
       const name = main.createDiv({ cls: 'wtl-review-option-name' });
-      if (c.choice.kind === 'task') {
+      if (c.keep) {
+        name.setText(`Keep label: ${choiceLabel(c.choice)}`);
+      } else if (c.choice.kind === 'task') {
         name.setText(c.choice.task.desc);
         const meta = [];
         if (c.choice.task.tags.length) meta.push(c.choice.task.tags.map(t => '#' + t).join(' '));
         if (c.choice.task.scheduled) meta.push(`⏳ ${c.choice.task.scheduled}`);
         if (meta.length) name.createSpan({ cls: 'wtl-review-meta', text: '  ' + meta.join('  ') });
-      } else {
+      } else if (c.choice.kind === 'tag') {
         name.setText(hashes(c.choice.tags));
         name.createSpan({ cls: 'wtl-review-meta', text: '  no specific task' });
+      } else {
+        name.setText(choiceLabel(c.choice));
       }
       if (c.reasons && c.reasons.length) main.createDiv({ cls: 'wtl-review-why', text: c.reasons.join(' · ') });
       if (c.suggested) row.createSpan({ cls: 'wtl-badge wtl-badge-suggested', text: 'suggested' });
       row.onclick = () => this.pick(idx);
     });
 
-    const noneRow = list.createDiv({ cls: 'wtl-review-option' + (b.suggestion && b.suggestion.kind === 'none' ? ' is-suggested' : '') });
+    const noneSuggested = !keep && b.suggestion && b.suggestion.kind === 'none';
+    const noneRow = list.createDiv({ cls: 'wtl-review-option' + (noneSuggested ? ' is-suggested' : '') });
     noneRow.createSpan({ cls: 'wtl-key', text: '0' });
     const nm = noneRow.createDiv({ cls: 'wtl-review-option-main' });
     nm.createDiv({ cls: 'wtl-review-option-name', text: 'Not task work' });
-    if (b.suggestion && b.suggestion.kind === 'none') {
+    if (noneSuggested) {
       nm.createDiv({ cls: 'wtl-review-why', text: b.suggestion.reasons.join(' · ') });
       noneRow.createSpan({ cls: 'wtl-badge wtl-badge-suggested', text: 'suggested' });
       // Enter accepts the highlighted suggestion.
@@ -2599,7 +2675,7 @@ class ReviewModal extends Modal {
     this.input = picker.input;
 
     const foot = el.createDiv({ cls: 'wtl-review-foot' });
-    foot.createDiv({ cls: 'wtl-muted', text: '1–9 choose · Enter accept suggestion · 0 not task work · / add tasks & tags (Enter on empty saves) · S skip · ← back' });
+    foot.createDiv({ cls: 'wtl-muted', text: '⇧1–8 area · 1–9 label · Enter accept · 0 not task work · / add tasks & tags · S skip · ← back' });
     const btns = foot.createDiv({ cls: 'wtl-review-buttons' });
     if (this.i > 0) btns.createEl('button', { text: 'Back' }).onclick = () => this.prev();
     btns.createEl('button', { text: 'Skip' }).onclick = () => this.next();
@@ -2609,13 +2685,20 @@ class ReviewModal extends Modal {
     const visible = this.choices.filter(c => !c.hidden);
     // Enter (idx 0) prefers the highlighted suggestion even when it is "not task work".
     const c = idx === 0 && this.choices[0] && this.choices[0].hidden ? this.choices[0] : visible[idx];
-    if (c) this.choose(c.choice);
+    return c ? this.choose(c.choice) : Promise.resolve();
   }
 
   async choose(choice) {
-    const b = this.current();
-    await this.plugin.annotate(this.report, b, choice);
-    if (this.area) await this.plugin.setArea(this.report, b, this.area);
+    if (this.saving) return; // one save at a time (fast double Enter)
+    this.saving = true;
+    try {
+      const b = this.current();
+      const area = this.area; // read before saving: the label save re-scores the week
+      await this.plugin.annotate(this.report, b, choice);
+      if (area) await this.plugin.setArea(this.report, b, area);
+    } finally {
+      this.saving = false;
+    }
     this.next();
   }
 
