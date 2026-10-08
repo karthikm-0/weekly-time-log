@@ -761,6 +761,56 @@ function renderTimeline(container, report, tip, color = null) {
 }
 
 /**
+ * Agenda: just what's planned, as a short list per day. Days without blocks are
+ * skipped; `fromToday` drops earlier days. Dots use the area colours.
+ */
+function renderAgenda(container, report, tip, color, { fromToday = false } = {}) {
+  const today = moment().format('YYYY-MM-DD');
+  const days = dayRows(report).filter(d => d.blocks.length && (!fromToday || d.iso >= today));
+  const list = container.createDiv({ cls: 'wtl-agenda' });
+  if (!days.length) {
+    list.createDiv({ cls: 'wtl-muted', text: fromToday ? 'Nothing else planned this week.' : 'Nothing planned this week.' });
+    return;
+  }
+  for (const d of days) {
+    const day = list.createDiv({ cls: 'wtl-agenda-day' + (d.iso === today ? ' is-today' : '') + (d.iso < today ? ' is-past' : '') });
+    const head = day.createDiv({ cls: 'wtl-agenda-head' });
+    head.createSpan({ cls: 'wtl-agenda-date', text: d.iso === today ? `Today · ${d.day.format('ddd MMM D')}` : d.day.format('ddd MMM D') });
+    head.createSpan({ cls: 'wtl-agenda-total', text: `${fmtHours1(d.total)} h` });
+    for (const b of [...d.blocks].sort((x, y) => x.start - y.start)) {
+      const row = day.createDiv({ cls: 'wtl-agenda-row' });
+      row.createSpan({ cls: 'wtl-agenda-time', text: `${b.start.format('h:mm')}–${b.end.format('h:mma')}` });
+      const dot = row.createSpan({ cls: 'wtl-agenda-dot' });
+      if (color) paint(dot, color, b.area && hasColor(color, b.area) ? b.area : '~other');
+      const main = row.createSpan({ cls: 'wtl-agenda-main' });
+      main.createSpan({ cls: 'wtl-agenda-title', text: b.title });
+      if (b.choice && b.choice.kind !== 'none') {
+        const label = b.choice.kind === 'tag' ? hashes(b.choice.tags) : choiceLabel(b.choice);
+        main.createSpan({ cls: 'wtl-agenda-label' + (b.status === 'confirmed' ? '' : ' is-pending'), text: label });
+      }
+      row.createSpan({ cls: 'wtl-agenda-hours', text: `${fmtHours1(b.hours)} h` });
+      const area = b.area ? `\n${b.area}${b.areaStatus === 'confirmed' ? '' : ' (suggested)'}` : '';
+      tip(row, `${b.title}\n${b.start.format('ddd h:mm')}–${b.end.format('h:mma')}${area}`);
+    }
+  }
+  if (color) {
+    const used = new Set(days.flatMap(d => d.blocks.map(b => b.area || '~other')));
+    const lg = container.createDiv({ cls: 'wtl-legend is-wrap' });
+    for (const [name] of color.slots) {
+      if (!used.has(name)) continue;
+      const it = lg.createSpan({ cls: 'wtl-legend-item' });
+      paint(it.createSpan({ cls: 'wtl-swatch' }), color, name);
+      it.createSpan({ text: name });
+    }
+    if (used.has('~other')) {
+      const it = lg.createSpan({ cls: 'wtl-legend-item' });
+      it.createSpan({ cls: 'wtl-swatch is-neutral' });
+      it.createSpan({ text: 'Unsorted' });
+    }
+  }
+}
+
+/**
  * "▸ Breakdown": a folded section with a switcher (Area, groupings, Tag, Task,
  * Calendar) and expandable bars. `state` keeps open/dimension/expanded rows
  * across redraws for whoever owns it.
@@ -2316,7 +2366,8 @@ class TimeLogView extends ItemView {
 //
 //   week: this | last | 2026-09-28 | 2026-W40   (default: from the note's filename, else this week)
 //   group: Project | Role | tag | task | calendar | none   (default: last view picked in the full log)
-//   show: full | chart | hours | days | timeline (default: full)
+//   show: full | chart | hours | days | timeline | agenda (default: full)
+//   from: today                                  (agenda: hide days before today)
 //   buttons: false                               (hide Review / Export / Open full log)
 
 /**
@@ -2422,6 +2473,11 @@ class TimeLogBlock extends MarkdownRenderChild {
     const color = (this.opts.group || '').toLowerCase() === 'none' ? null : this.plugin.colorsFor(report, chartDim);
     if (show === 'days') {
       renderDays(el, report, nativeTip, color);
+      return this.renderFoot(report, path);
+    }
+    if (show === 'agenda') {
+      const areaColor = (this.opts.group || '').toLowerCase() === 'none' ? null : this.plugin.colorsFor(report, areaDim);
+      renderAgenda(el, report, nativeTip, areaColor, { fromToday: (this.opts.from || '').toLowerCase() === 'today' });
       return this.renderFoot(report, path);
     }
     this.breakdown = this.breakdown || { dim: this.opts.detail || null };

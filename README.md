@@ -18,7 +18,8 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 
   ````
   ```time-log
-  show: hours        # full (default) | chart | hours | days | timeline
+  show: hours        # full (default) | chart | hours | days | timeline | agenda
+  from: today        # agenda only: hide days before today
   group: Role        # what daily charts and the summary line split by (default: area); none = plain
   detail: Role       # grouping for the folded breakdown in show: full (default: the full log's choice)
   buttons: false     # hide Review / Export CSV / Open full log (shown under every layout by default)
