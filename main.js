@@ -847,6 +847,31 @@ function renderBreakdown(host, report, settings, state, { tip, openTask, title =
   return det;
 }
 
+/**
+ * How a block's labels are filed. Keys follow the calendar event, not its time, so
+ * moving a block in the calendar keeps its label and area:
+ *   single event      calendar|uid
+ *   repeating event   calendar|uid|occurrence date
+ *   no uid            calendar|title|start   (can't follow moves)
+ * `altKeys` and `legacyPrefix` find labels saved under older keys (see resolveLabel).
+ */
+function blockKeys(calendarId, ev, startM, occurrence) {
+  const startIso = startM.format('YYYY-MM-DDTHH:mm');
+  if (!ev.uid) return { key: `${calendarId}|${ev.title}|${startIso}`, altKeys: [], legacyPrefix: null };
+  if (occurrence) {
+    return { key: `${calendarId}|${ev.uid}|${occurrence}`, altKeys: [], legacyPrefix: `${calendarId}|${ev.uid}|${occurrence}T` };
+  }
+  const altKeys = [];
+  // A single occurrence moved in Google becomes its own event ("<series id>_20260929T…"):
+  // look for the label it had as part of the series.
+  if (ev.recurringEventId) {
+    const m = String(ev.uid).match(/_(\d{4})(\d{2})(\d{2})(?:T\d+Z?)?$/);
+    if (m) altKeys.push(`${calendarId}|${ev.recurringEventId}|${m[1]}-${m[2]}-${m[3]}`);
+  }
+  // Before v0.3 keys ended in the start time; any of those for this uid is this event.
+  return { key: `${calendarId}|${ev.uid}`, altKeys, legacyPrefix: `${calendarId}|${ev.uid}|` };
+}
+
 module.exports = class WeeklyTimeLogPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
@@ -1210,12 +1235,13 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const blocks = [];
     const overridden = new Set(); // recurring instances replaced by a one-off edit
 
-    const add = (calendarId, ev, startM, endM) => {
+    // `occurrence`: the date of a repeating event's instance (they share one uid).
+    const add = (calendarId, ev, startM, endM, occurrence = null) => {
       const hours = Math.max(0, (endM.valueOf() - startM.valueOf()) / 36e5);
       if (!hours) return;
       const title = (ev.title || '').trim() || '(untitled)';
       blocks.push({
-        key: `${calendarId}|${ev.uid || ev.title}|${startM.format('YYYY-MM-DDTHH:mm')}`,
+        ...blockKeys(calendarId, ev, startM, occurrence),
         calendarId,
         calendar: names.get(calendarId) || calendarId,
         title,
@@ -1252,7 +1278,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         const startM = atTime(date, ev.startTime);
         let endM = ev.endTime ? atTime(date, ev.endTime) : startM.clone().add(1, 'hour');
         if (!endM.isAfter(startM)) endM.add(1, 'day');
-        add(calendarId, ev, startM, endM);
+        add(calendarId, ev, startM, endM, date);
       }
     }
 
@@ -1472,7 +1498,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
   assign(report) {
     const byKey = new Map(report.tasks.map(t => [t.key, t]));
     for (const b of report.blocks) {
-      const a = this.settings.annotations[b.key];
+      const a = this.resolveLabel(this.settings.annotations, b);
       if (a) {
         b.status = 'confirmed';
         // A task may have moved or been deleted since; keep the label anyway.
@@ -1501,10 +1527,33 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     return report;
   }
 
+  /**
+   * The saved entry for a block in `map` (labels or areas). Entries found under an
+   * older key (time-based, or from before an occurrence was moved) are moved to the
+   * block's current key, so they keep following it.
+   */
+  resolveLabel(map, b) {
+    if (!map) return undefined;
+    if (map[b.key]) return map[b.key];
+    let from = (b.altKeys || []).find(k => map[k]);
+    if (!from && b.legacyPrefix) {
+      // Newest wins if an old time-based key exists for several dates.
+      from = Object.keys(map).filter(k => k.startsWith(b.legacyPrefix)).sort().pop();
+    }
+    if (!from) return undefined;
+    map[b.key] = map[from];
+    delete map[from];
+    this.keysMigrated = true;
+    return map[b.key];
+  }
+
   rescore(report) {
+    this.keysMigrated = false;
     this.scoreBlocks(report);
     this.assign(report);
-    return this.assignAreas(report);
+    this.assignAreas(report);
+    if (this.keysMigrated) this.saveSettings();
+    return report;
   }
 
   // ---- Areas ---------------------------------------------------------------
@@ -1531,7 +1580,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const defaultArea = names.get((this.settings.defaultTaskArea || '').toLowerCase()) || null;
 
     for (const b of report.blocks) {
-      const confirmed = (this.settings.areaLabels || {})[b.key];
+      const confirmed = this.resolveLabel(this.settings.areaLabels, b);
       if (confirmed && names.has(confirmed.area.toLowerCase())) {
         b.area = names.get(confirmed.area.toLowerCase());
         b.areaStatus = 'confirmed';

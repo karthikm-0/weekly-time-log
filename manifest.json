@@ -1,7 +1,7 @@
 {
   "id": "weekly-time-log",
   "name": "Weekly Time Log",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.5.0",
   "description": "Builds a weekly time log from Full Calendar Remastered blocks, matched to your open Tasks. Shows charts and exports CSV.",
   "author": "Karthik",
