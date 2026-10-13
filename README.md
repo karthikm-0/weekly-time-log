@@ -31,6 +31,12 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 
 Whenever a `time-log` block is shown, its week's CSV is saved to the export folder and re-saved each time a label changes (unchanged files aren't rewritten). Once a day (the first time Obsidian is open), last week's CSV is also saved and, if anything is unreviewed, a reminder appears. Reviewing re-saves the CSV. Both can be turned off in settings. The background check never opens the access dialog and never saves an empty week.
 
+## Which calendars count
+
+Every Full Calendar calendar is included except its Tasks calendar; switch any off under Settings → *Calendars to log*. Calendars you add later are included automatically. If anything in the week doesn't become a block (a calendar you switched off, all-day events, a repeat pattern the plugin can't follow), the log says "N calendar events not shown — why?" with the details per calendar.
+
+Repeating events: daily, weekly (including every N weeks, several days), monthly (by date, "2nd Tuesday", "last Friday") and yearly patterns are supported.
+
 ## How blocks are matched
 
 Heuristic, no trained model. Each block is scored against open tasks (plus tasks completed during or after that week) using:

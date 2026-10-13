@@ -16,7 +16,9 @@ const LOCAL_KEYS = ['token', 'lastCheck', 'dataFile'];
 
 const DEFAULTS = {
   token: null,           // Full Calendar API token
-  calendarIds: null,     // null = every calendar source except Tasks
+  // calendar id -> true/false, only for calendars you switched. Anything not listed
+  // follows the default (on, except the Tasks calendar), so new calendars show up.
+  calendarChoices: {},
   weekStart: 'calendar', // 'calendar' | '0' (Sun) | '1' (Mon)
   exportFolder: 'Time Logs',
   // One grouping per line, e.g. "Role: postdoc (uist2026, chi2026), faculty"
@@ -152,38 +154,77 @@ function parseRRule(str) {
     const [k, v] = p.split('=');
     if (k && v) parts[k.toUpperCase()] = v;
   }
+  const known = new Set(['FREQ', 'INTERVAL', 'BYDAY', 'UNTIL', 'COUNT', 'BYMONTHDAY', 'BYMONTH', 'WKST']);
+  const unsupported = Object.keys(parts).filter(k => !known.has(k));
+  if (parts.FREQ && !['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'].includes(parts.FREQ)) unsupported.push(`FREQ=${parts.FREQ}`);
+  const nums = v => (v ? v.split(',').map(Number).filter(n => !Number.isNaN(n) && n !== 0) : null);
   return {
     freq: parts.FREQ,
     interval: parseInt(parts.INTERVAL || '1', 10) || 1,
-    byDay: parts.BYDAY ? parts.BYDAY.split(',').map(d => WEEKDAY_RRULE[d.slice(-2)]).filter(d => d !== undefined) : null,
+    // "2TU" = 2nd Tuesday, "-1FR" = last Friday, "MO" = every Monday
+    byDay: parts.BYDAY ? parts.BYDAY.split(',').map(x => {
+      const m = x.trim().match(/^([+-]?\d+)?([A-Z]{2})$/);
+      return m && WEEKDAY_RRULE[m[2]] !== undefined ? { day: WEEKDAY_RRULE[m[2]], nth: m[1] ? parseInt(m[1], 10) : 0 } : null;
+    }).filter(Boolean) : null,
+    byMonthDay: nums(parts.BYMONTHDAY),
+    byMonth: nums(parts.BYMONTH),
+    wkst: WEEKDAY_RRULE[parts.WKST] ?? 1,
     until: parts.UNTIL ? moment(parts.UNTIL.slice(0, 8), 'YYYYMMDD').format('YYYY-MM-DD') : null,
     count: parts.COUNT ? parseInt(parts.COUNT, 10) : null,
+    unsupported,
+    text: line.replace(/^RRULE:/, ''),
   };
 }
 
-/** Returns ISO dates in [from, to) on which the rule fires. */
+/** nth weekday of its month: 2 = second, -1 = last; 0 = any. */
+function nthWeekdayOk(d, nth) {
+  if (!nth) return true;
+  if (nth > 0) return Math.ceil(d.date() / 7) === nth;
+  return Math.ceil((d.daysInMonth() - d.date() + 1) / 7) === -nth;
+}
+
+function monthDayOk(d, list) {
+  return list.some(n => (n > 0 ? d.date() === n : d.date() === d.daysInMonth() + n + 1));
+}
+
+/** Returns ISO dates in [from, to) on which the rule fires ([] for rules it can't follow). */
 function expandDates(rule, startDate, from, to) {
-  if (!startDate || !rule.freq) return [];
+  if (!startDate || !rule.freq || (rule.unsupported && rule.unsupported.length)) return [];
   const start = moment(startDate, 'YYYY-MM-DD');
+  const weekStartOf = m => m.clone().subtract((m.day() - (rule.wkst ?? 1) + 7) % 7, 'days');
+  const startWeek = weekStartOf(start);
+  const matches = d => {
+    if (rule.byMonth && !rule.byMonth.includes(d.month() + 1)) return false;
+    if (rule.freq === 'DAILY') {
+      return d.diff(start, 'days') % rule.interval === 0 && (!rule.byDay || rule.byDay.some(x => x.day === d.day()));
+    }
+    if (rule.freq === 'WEEKLY') {
+      const days = rule.byDay && rule.byDay.length ? rule.byDay.map(x => x.day) : [start.day()];
+      const weeks = Math.round(weekStartOf(d).diff(startWeek, 'days') / 7);
+      return days.includes(d.day()) && weeks % rule.interval === 0;
+    }
+    if (rule.freq === 'MONTHLY') {
+      const months = (d.year() - start.year()) * 12 + d.month() - start.month();
+      if (months % rule.interval) return false;
+      if (rule.byMonthDay) return monthDayOk(d, rule.byMonthDay);
+      if (rule.byDay) return rule.byDay.some(x => x.day === d.day() && nthWeekdayOk(d, x.nth));
+      return d.date() === start.date();
+    }
+    if (rule.freq === 'YEARLY') {
+      if ((d.year() - start.year()) % rule.interval) return false;
+      if (!rule.byMonth && d.month() !== start.month()) return false;
+      if (rule.byMonthDay) return monthDayOk(d, rule.byMonthDay);
+      if (rule.byDay) return rule.byDay.some(x => x.day === d.day() && nthWeekdayOk(d, x.nth));
+      return d.date() === start.date();
+    }
+    return false;
+  };
   const out = [];
   let n = 0;
-  const startWeek = start.clone().startOf('isoWeek');
-  for (let d = start.clone(); d.isBefore(to) && n < 5000; d.add(1, 'day')) {
+  for (let d = start.clone(); d.isBefore(to); d.add(1, 'day')) {
     const iso = d.format('YYYY-MM-DD');
     if (rule.until && iso > rule.until) break;
-    let hit = false;
-    if (rule.freq === 'DAILY') {
-      hit = d.diff(start, 'days') % rule.interval === 0;
-    } else if (rule.freq === 'WEEKLY') {
-      const days = rule.byDay && rule.byDay.length ? rule.byDay : [start.day()];
-      const weeks = Math.round(d.clone().startOf('isoWeek').diff(startWeek, 'days') / 7);
-      hit = days.includes(d.day()) && weeks % rule.interval === 0;
-    } else if (rule.freq === 'MONTHLY' && !rule.byDay) {
-      hit = d.date() === start.date() && d.diff(start, 'months') % rule.interval === 0;
-    } else if (rule.freq === 'YEARLY') {
-      hit = d.date() === start.date() && d.month() === start.month();
-    }
-    if (!hit) continue;
+    if (!matches(d)) continue;
     n++;
     if (rule.count && n > rule.count) break;
     if (!d.isBefore(from)) out.push(iso);
@@ -191,17 +232,19 @@ function expandDates(rule, startDate, from, to) {
   return out;
 }
 
+/** Full Calendar's own (note-based) repeating events, as an RRULE-like rule. */
 function fcRecurringToRule(ev) {
-  if (ev.fcrDaily) return { freq: 'DAILY', interval: ev.repeatInterval || 1, until: ev.endRecur || null };
+  const base = { interval: ev.repeatInterval || 1, until: ev.endRecur || null, unsupported: [] };
+  if (ev.fcrDaily) return { ...base, freq: 'DAILY' };
   if (ev.daysOfWeek && ev.daysOfWeek.length) {
-    return {
-      freq: 'WEEKLY',
-      interval: ev.repeatInterval || 1,
-      byDay: ev.daysOfWeek.map(d => (typeof d === 'number' ? d : WEEKDAY_FC[d])),
-      until: ev.endRecur || null,
-    };
+    return { ...base, freq: 'WEEKLY', byDay: ev.daysOfWeek.map(d => ({ day: typeof d === 'number' ? d : WEEKDAY_FC[d], nth: 0 })) };
   }
-  return { freq: null };
+  if (ev.repeatOn && ev.repeatOn.weekday !== undefined) {
+    return { ...base, freq: 'MONTHLY', byDay: [{ day: Number(ev.repeatOn.weekday), nth: Number(ev.repeatOn.week) || 0 }] };
+  }
+  if (ev.month && ev.dayOfMonth) return { ...base, freq: 'YEARLY', byMonth: [Number(ev.month)], byMonthDay: [Number(ev.dayOfMonth)] };
+  if (ev.dayOfMonth) return { ...base, freq: 'MONTHLY', byMonthDay: [Number(ev.dayOfMonth)] };
+  return { ...base, freq: null, unsupported: ['unknown repeat pattern'] };
 }
 
 function atTime(date, time) {
@@ -1064,8 +1107,16 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     }
     this.settings.annotations = this.settings.annotations || {};
     this.migrateOverrides();
+    if (Array.isArray(this.settings.calendarIds)) {
+      // The old allow-list left out calendars added after it was saved. Keep the ones
+      // you had on; everything else now follows the default (on, except Tasks).
+      this.settings.calendarChoices = this.settings.calendarChoices || {};
+      for (const id of this.settings.calendarIds) this.settings.calendarChoices[id] = true;
+      delete this.settings.calendarIds;
+      this.migratedCalendars = true;
+    }
     // First run with the vault file (or upgrade from plugin-only storage): write it out.
-    if (!shared) await this.saveSettings();
+    if (!shared || this.migratedCalendars) await this.saveSettings();
   }
 
   async readDataFile() {
@@ -1219,9 +1270,13 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const api = await this.calendarApi();
     const { sources } = await this.calendarSources();
     const names = new Map(sources.map(s => [s.id, s.name || s.id]));
-    const wanted = this.settings.calendarIds
-      ? new Set(this.settings.calendarIds)
-      : new Set(sources.filter(s => s.type !== 'tasks').map(s => s.id));
+    const wanted = new Set(sources.filter(src => this.calendarIncluded(src)).map(src => src.id));
+    // What didn't make it in, per calendar, so nothing goes missing silently.
+    const diag = new Map(sources.map(src => [src.id, {
+      id: src.id, name: src.name || src.id, type: src.type, included: wanted.has(src.id),
+      shown: 0, off: 0, allDay: [], rules: [], noTime: [],
+    }]));
+    const note = id => diag.get(id) || diag.set(id, { id, name: id, included: wanted.has(id), shown: 0, off: 0, allDay: [], rules: [], noTime: [] }).get(id);
 
     let events;
     try {
@@ -1239,6 +1294,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const add = (calendarId, ev, startM, endM, occurrence = null) => {
       const hours = Math.max(0, (endM.valueOf() - startM.valueOf()) / 36e5);
       if (!hours) return;
+      note(calendarId).shown++;
       const title = (ev.title || '').trim() || '(untitled)';
       blocks.push({
         ...blockKeys(calendarId, ev, startM, occurrence),
@@ -1254,27 +1310,50 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       });
     };
 
+    const weekStartIso = start.format('YYYY-MM-DD');
+    const weekEndIso = end.format('YYYY-MM-DD');
     const recurring = [];
     for (const r of events) {
-      if (!wanted.has(r.calendarId)) continue;
       const ev = (r.rawEvent && r.rawEvent.event) || {};
-      if (ev.allDay || r.allDay) continue;
-      if (ev.type === 'rrule' || ev.type === 'recurring') {
+      const repeating = ev.type === 'rrule' || ev.type === 'recurring';
+      const inWeek = !repeating && (r.startMillis != null
+        ? r.startMillis >= s0 && r.startMillis < e0
+        : ev.date >= weekStartIso && ev.date < weekEndIso);
+      if (!wanted.has(r.calendarId)) {
+        if (inWeek) note(r.calendarId).off++;
+        if (repeating) recurring.push({ calendarId: r.calendarId, ev, off: true });
+        continue;
+      }
+      if (ev.allDay || r.allDay) {
+        if (inWeek) note(r.calendarId).allDay.push(ev.title || '(untitled)');
+        if (repeating) recurring.push({ calendarId: r.calendarId, ev, allDay: true });
+        continue;
+      }
+      if (repeating) {
         recurring.push({ calendarId: r.calendarId, ev });
         continue;
       }
       if (ev.recurringEventId) overridden.add(`${ev.recurringEventId}|${ev.date}`);
-      if (r.startMillis == null || r.startMillis < s0 || r.startMillis >= e0) continue;
+      if (!inWeek || r.startMillis == null) continue;
       add(r.calendarId, ev, moment(r.startMillis), moment(r.endMillis ?? r.startMillis + 36e5));
     }
 
-    for (const { calendarId, ev } of recurring) {
-      if (!ev.startTime) continue;
+    for (const { calendarId, ev, off, allDay } of recurring) {
       const rule = ev.type === 'rrule' ? parseRRule(ev.rrule) : fcRecurringToRule(ev);
       const first = ev.type === 'rrule' ? ev.startDate : ev.startRecur;
+      const title = ev.title || '(untitled)';
+      if (rule.unsupported && rule.unsupported.length) {
+        // Only worth mentioning if it could still be running this week.
+        const live = (!first || first < weekEndIso) && (!rule.until || rule.until >= weekStartIso);
+        if (live && !off) note(calendarId).rules.push({ title, rule: rule.text || rule.unsupported.join(', ') });
+        continue;
+      }
       const skip = new Set(ev.skipDates || []);
-      for (const date of expandDates(rule, first, start, end)) {
-        if (skip.has(date) || overridden.has(`${ev.uid}|${date}`)) continue;
+      const dates = expandDates(rule, first, start, end).filter(d => !skip.has(d) && !overridden.has(`${ev.uid}|${d}`));
+      if (off) { note(calendarId).off += dates.length; continue; }
+      if (allDay) { for (const d of dates) note(calendarId).allDay.push(title); continue; }
+      if (!ev.startTime) { if (dates.length) note(calendarId).noTime.push(title); continue; }
+      for (const date of dates) {
         const startM = atTime(date, ev.startTime);
         let endM = ev.endTime ? atTime(date, ev.endTime) : startM.clone().add(1, 'hour');
         if (!endM.isAfter(startM)) endM.add(1, 'day');
@@ -1283,7 +1362,13 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     }
 
     blocks.sort((a, b) => a.start.valueOf() - b.start.valueOf());
-    return blocks;
+    return { blocks, calendars: [...diag.values()] };
+  }
+
+  /** Default: every calendar except Full Calendar's Tasks calendar; your switches win. */
+  calendarIncluded(src) {
+    const c = (this.settings.calendarChoices || {})[src.id];
+    return c !== undefined ? !!c : src.type !== 'tasks';
   }
 
   /** tag (without #) -> number of uses across the vault. */
@@ -1673,11 +1758,11 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
   async buildReport(offset = 0, anchor = null) {
     const { start, end } = await this.weekBounds(offset, anchor);
-    const [blocks, tasks] = await Promise.all([
+    const [{ blocks, calendars }, tasks] = await Promise.all([
       this.collectBlocks(start, end),
       this.collectTasks(start.format('YYYY-MM-DD')),
     ]);
-    return this.rescore({ start, end, blocks, tasks, tagCounts: this.collectVaultTags() });
+    return this.rescore({ start, end, blocks, tasks, calendars, tagCounts: this.collectVaultTags() });
   }
 
   // ---- Colours -------------------------------------------------------------
@@ -2241,6 +2326,9 @@ class TimeLogView extends ItemView {
       rev.addClass('is-clickable');
       rev.onclick = () => this.review();
     }
+    if (skippedCount(report)) {
+      renderSkippedLink(root.createDiv({ cls: 'wtl-skipped-line' }), this.plugin, report, () => this.refresh(true));
+    }
 
     if (!report.blocks.length) {
       root.createDiv({
@@ -2593,6 +2681,7 @@ class TimeLogBlock extends MarkdownRenderChild {
       this.render();
     };
     foot.createEl('button', { text: 'Open full log' }).onclick = () => this.plugin.openView(report.start);
+    renderSkippedLink(foot, this.plugin, report, () => this.plugin.refreshViews());
     const file = this.plugin.app.vault.getAbstractFileByPath(path);
     foot.createSpan({
       cls: 'wtl-muted',
@@ -2623,6 +2712,72 @@ class TimeLogBlock extends MarkdownRenderChild {
     if (pending) link(`review ${pending}`, () => this.plugin.openReview(report, () => this.render()));
     link('export', async () => { await this.plugin.exportCsv(report); this.render(); });
     link('open log', () => this.plugin.openView(report.start));
+    if (skippedCount(report)) {
+      el.createSpan({ cls: 'wtl-muted', text: ' · ' });
+      renderSkippedLink(el, this.plugin, report, () => this.plugin.refreshViews());
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// "N calendar events not shown — why?"
+
+/** Events in the week that didn't become blocks (Tasks calendar excluded: off by design). */
+function skippedCount(report) {
+  return (report.calendars || []).reduce((a, c) => a + (c.type === 'tasks' ? 0 : c.off) + c.allDay.length + c.rules.length + c.noTime.length, 0);
+}
+
+function renderSkippedLink(parent, plugin, report, onChange) {
+  const n = skippedCount(report);
+  if (!n) return;
+  const a = parent.createEl('a', { cls: 'wtl-line-link wtl-skipped-link', href: '#', text: `${plural(n, 'calendar event')} not shown — why?` });
+  a.onclick = e => { e.preventDefault(); new SkippedModal(plugin.app, plugin, report, onChange).open(); };
+}
+
+class SkippedModal extends Modal {
+  constructor(app, plugin, report, onChange) {
+    super(app);
+    this.plugin = plugin;
+    this.report = report;
+    this.onChange = onChange;
+  }
+
+  onOpen() {
+    const el = this.contentEl;
+    el.addClass('wtl-skipped');
+    el.createEl('h3', { text: 'Calendars this week' });
+    for (const c of this.report.calendars || []) {
+      const box = el.createDiv({ cls: 'wtl-skipped-cal' });
+      const head = box.createDiv({ cls: 'wtl-skipped-head' });
+      head.createSpan({ cls: 'wtl-skipped-name', text: c.name });
+      head.createSpan({ cls: 'wtl-muted', text: c.included ? `${plural(c.shown, 'block')} shown` : 'switched off' });
+      if (!c.included) {
+        const why = c.type === 'tasks' ? 'Tasks calendar: off by default, since these are tasks rather than time blocks.' : 'Switched off in this plugin\'s settings.';
+        box.createDiv({ cls: 'wtl-muted', text: `${why}${c.off ? ` ${plural(c.off, 'event')} this week.` : ''}` });
+        const btn = box.createEl('button', { text: `Include ${c.name}`, cls: c.type === 'tasks' ? '' : 'mod-cta' });
+        btn.onclick = async () => {
+          this.plugin.settings.calendarChoices = this.plugin.settings.calendarChoices || {};
+          this.plugin.settings.calendarChoices[c.id] = true;
+          await this.plugin.saveSettings();
+          this.close();
+          this.onChange();
+        };
+      }
+      if (c.allDay.length) {
+        box.createDiv({ cls: 'wtl-muted', text: `All-day, not counted as time (${c.allDay.length}): ${[...new Set(c.allDay)].join(', ')}` });
+      }
+      for (const r of c.rules) {
+        box.createDiv({ cls: 'wtl-skipped-rule', text: `Repeating "${r.title}": pattern not supported yet (${r.rule}). Tell me this rule and I can add it.` });
+      }
+      if (c.noTime.length) {
+        box.createDiv({ cls: 'wtl-muted', text: `Repeating without a start time: ${[...new Set(c.noTime)].join(', ')}` });
+      }
+    }
+    el.createDiv({ cls: 'wtl-muted wtl-skipped-foot', text: 'Calendars you add later are included automatically.' });
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 
@@ -2855,15 +3010,15 @@ class TimeLogSettings extends PluginSettingTab {
     }
 
     containerEl.createEl('h3', { text: 'Calendars to log' });
-    const active = s.calendarIds ? new Set(s.calendarIds) : new Set(sources.filter(x => x.type !== 'tasks').map(x => x.id));
+    s.calendarChoices = s.calendarChoices || {};
     for (const src of sources) {
       new Setting(containerEl)
         .setName(src.name || src.id)
         .setDesc(src.type === 'tasks' ? 'Tasks shown on the calendar (off by default: these are tasks, not blocks)' : src.type)
-        .addToggle(t => t.setValue(active.has(src.id)).onChange(async v => {
-          if (v) active.add(src.id); else active.delete(src.id);
-          s.calendarIds = [...active];
+        .addToggle(t => t.setValue(this.plugin.calendarIncluded(src)).onChange(async v => {
+          s.calendarChoices[src.id] = v; // only this calendar; new calendars still default on
           await this.plugin.saveSettings();
+          this.plugin.refreshViews();
         }));
     }
 

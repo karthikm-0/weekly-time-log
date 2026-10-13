@@ -340,3 +340,13 @@ body.theme-dark {
 .wtl-agenda-title { color: var(--text-normal); }
 .wtl-agenda-label { color: var(--text-faint); margin-left: 8px; font-size: var(--font-ui-smaller); }
 .wtl-agenda-label.is-pending { font-style: italic; }
+
+/* Skipped events */
+.wtl-skipped-link { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.wtl-skipped-line { margin: -8px 0 12px; }
+.wtl-skipped-cal { padding: 8px 0; border-bottom: 1px solid var(--background-modifier-border); display: flex; flex-direction: column; gap: 4px; }
+.wtl-skipped-head { display: flex; justify-content: space-between; gap: 8px; }
+.wtl-skipped-name { font-weight: 600; }
+.wtl-skipped-cal button { align-self: flex-start; }
+.wtl-skipped-rule { font-size: var(--font-ui-small); color: var(--text-warning); }
+.wtl-skipped-foot { margin-top: 8px; }
