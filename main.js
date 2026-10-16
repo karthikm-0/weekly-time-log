@@ -36,13 +36,13 @@ const DEFAULTS = {
   ].join('\n'),
   defaultTaskArea: 'Work', // area for blocks attached to a task when nothing else says otherwise
   areaLabels: {},          // blockKey -> { area, title, tags }: confirmed areas, also training data
-  // Tracker (aTimeLogger-style): one tap starts an activity. "Activity: Area" per line.
+  // Activities and their areas, one per line: "Activity: Area". Used by the Tracker panel and to
+  // sort aTimeLogger types into areas (types not listed stay Unsorted).
   activities: ['Eating: Meals', 'Hygiene: Personal', 'Exercise: Exercise', 'Non-work: Personal'].join('\n'),
   tracked: [],             // { id, activity, start (ms), end (ms | null while running) }
-  // Phone taps: an iOS Shortcut adds a reminder ("Eating", "Stop") to this list; the Mac imports it.
-  phoneImport: true,
-  phoneList: 'Time Tracker',
-  phoneSeen: [],           // reminder ids already imported (so a failed tick never imports twice)
+  // aTimeLogger CSV exports dropped here are read into the log (vault folder, or a full
+  // path on the Mac such as an iCloud Drive folder). The files stay the source of truth.
+  importFolder: 'Time Logs/aTimeLogger',
   view: null,            // last grouping picked in the full log
   minScore: 0.55,
   autoExport: true,      // save last week's CSV daily, and re-save after reviewing
@@ -926,68 +926,83 @@ function blockKeys(calendarId, ev, startM, occurrence) {
 // ---------------------------------------------------------------------------
 // Tracker: tap an activity to start it (stops whatever was running)
 
-// Apple Reminders, via JavaScript for Automation (Mac only), like the Reminders Inbox plugin.
-const PHONE_FETCH = `function run(argv) {
-  const lists = Application('Reminders').lists.whose({ name: argv[0] })();
-  if (!lists.length) return JSON.stringify({ missing: true });
-  const rs = lists[0].reminders.whose({ completed: false });
-  const ids = rs.id(), names = rs.name(), made = rs.creationDate();
-  return JSON.stringify({ items: ids.map((id, i) => ({ id: id, name: names[i] || '', created: made[i] ? made[i].getTime() : null })) });
-}`;
-const PHONE_TICK = `function run(argv) {
-  const lists = Application('Reminders').lists.whose({ name: argv[0] })();
-  const done = [];
-  if (!lists.length) return JSON.stringify(done);
-  for (const id of argv.slice(1)) {
-    try { lists[0].reminders.byId(id).completed = true; done.push(id); } catch (e) {}
-  }
-  return JSON.stringify(done);
-}`;
+// ---------------------------------------------------------------------------
+// aTimeLogger CSV import
 
-function jxa(script, args) {
-  const { execFile } = require('child_process');
-  return new Promise((resolve, reject) => {
-    execFile('osascript', ['-l', 'JavaScript', '-e', script, ...args], { timeout: 60000, maxBuffer: 4 << 20 }, (err, out, errOut) => {
-      if (err) reject(new Error(String(errOut || err.message).trim()));
-      else resolve(out.trim());
-    });
-  });
+/** Small CSV reader: quoted fields, "" escapes, comma/semicolon/tab picked from the header. */
+function parseCsv(text) {
+  text = text.replace(/^\uFEFF/, '');
+  const first = text.split(/\r?\n/, 1)[0] || '';
+  const delim = [',', ';', '\t'].sort((a, b) => first.split(b).length - first.split(a).length)[0];
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') quoted = false; else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === delim) { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows.map(r => r.map(c => c.trim()));
+}
+
+const DATE_FORMATS = [
+  'YYYY-MM-DD HH:mm', 'YYYY-MM-DD HH:mm:ss', 'YYYY-MM-DDTHH:mm', 'YYYY-MM-DDTHH:mm:ss', 'YYYY/MM/DD HH:mm',
+  'M/D/YY, h:mm A', 'M/D/YYYY, h:mm A', 'M/D/YY h:mm A', 'M/D/YYYY h:mm A', 'M/D/YYYY HH:mm',
+  'D.M.YYYY HH:mm', 'DD.MM.YYYY HH:mm', 'D.M.YY HH:mm',
+  'MMM D, YYYY h:mm A', 'MMM D, YYYY [at] h:mm A', 'D MMM YYYY HH:mm', 'D MMM YYYY, HH:mm',
+];
+
+function parseWhen(str) {
+  if (!str) return null;
+  const clean = str.replace(/\u202F|\u00A0/g, ' ').trim(); // iOS puts narrow spaces before AM/PM
+  const m = moment(clean, DATE_FORMATS, true);
+  if (m.isValid()) return m.valueOf();
+  const d = Date.parse(clean);
+  return Number.isNaN(d) ? null : d;
 }
 
 /**
- * A phone tap, from the reminder's title and creation time:
- *   "Eating"                 start Eating when the reminder was made
- *   "Stop" / "Done"          stop whatever is running
- *   "Eating 20m ago"         start 20 minutes earlier
- *   "Eating at 12:30"        start at 12:30 (the latest 12:30 before the tap)
- * Names match activities case-insensitively ("eat" -> Eating); unknown names are kept as typed.
+ * aTimeLogger export -> entries. Columns are found by name (activity/type, from/start,
+ * to/end, comment/note), so export variants work; rows without two readable times
+ * (summary tables, blank lines) are skipped and counted.
  */
-function parsePhoneTap(title, created, activities) {
-  let t = String(title || '').replace(/\s+/g, ' ').trim();
-  let at = created;
-  let m = t.match(/\s+(\d+(?:\.\d+)?)\s*(m|min|mins|minutes?|h|hr|hrs|hours?)\s+ago$/i);
-  if (m) {
-    at -= Number(m[1]) * (/^h/i.test(m[2]) ? 3600e3 : 60e3);
-    t = t.slice(0, m.index).trim();
-  } else if ((m = t.match(/\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i))) {
-    const made = moment(created);
-    let h = Number(m[1]) % 12;
-    const min = Number(m[2] || 0);
-    const options = m[3] ? [h + (m[3].toLowerCase() === 'pm' ? 12 : 0)] : [h, h + 12];
-    // The latest matching time at or before the tap (today, else yesterday).
-    const cands = [];
-    for (const day of [0, -1]) for (const hh of options) cands.push(made.clone().add(day, 'day').hour(hh).minute(min).second(0).millisecond(0).valueOf());
-    at = Math.max(...cands.filter(c => c <= created + 60e3), created - 24 * 3600e3);
-    t = t.slice(0, m.index).trim();
+function parseATimeLogger(text) {
+  const rows = parseCsv(text);
+  const out = { entries: [], skipped: 0, read: 0, header: null };
+  let cols = null;
+  for (const r of rows) {
+    // A blank line ends the data (exports can append a summary table after one).
+    if (!r.some(c => c)) { if (out.read) cols = null; continue; }
+    const low = r.map(c => c.toLowerCase());
+    const find = re => low.findIndex(c => re.test(c));
+    const act = find(/activity|type|category/);
+    const from = find(/^(from|start)/);
+    const to = find(/^(to|end|till|until|finish)/);
+    if (act >= 0 && from >= 0 && to >= 0) {
+      cols = { act, from, to, note: find(/comment|note/) };
+      out.header = r;
+      continue;
+    }
+    if (!cols) continue;
+    out.read++;
+    const start = parseWhen(r[cols.from]);
+    const end = parseWhen(r[cols.to]);
+    const activity = (r[cols.act] || '').trim();
+    if (!activity || start == null || end == null || end <= start) { out.skipped++; continue; }
+    out.entries.push({ activity, start, end, note: cols.note >= 0 ? r[cols.note] || '' : '' });
   }
-  if (/^(stop|done|end|off|finish(ed)?)$/i.test(t)) return { kind: 'stop', at };
-  const low = t.toLowerCase();
-  const act = activities.find(a => a.name.toLowerCase() === low)
-    || (low.length >= 3 && activities.find(a => a.name.toLowerCase().startsWith(low)));
-  return { kind: 'start', activity: act ? act.name : t, at };
+  return out;
 }
 
-/** "Eating: Meals" -> { name: 'Eating', area: 'Meals' } */
+/** "Eating: Meals" -> { name: 'Eating', area: 'Meals' } *//** "Eating: Meals" -> { name: 'Eating', area: 'Meals' } */
 function parseActivities(text) {
   const out = [];
   for (const line of (text || '').split('\n')) {
@@ -1181,11 +1196,16 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     this.statusEl.onclick = () => this.openTracker();
     this.updateStatusBar();
     this.registerInterval(window.setInterval(() => this.updateStatusBar(), 30 * 1000));
-    if (Platform.isDesktopApp) {
-      this.app.workspace.onLayoutReady(() => window.setTimeout(() => this.importPhone(), 5000));
-      this.registerDomEvent(window, 'focus', () => this.importPhone());
-      this.registerInterval(window.setInterval(() => this.importPhone(), 2 * 60 * 1000));
-    }
+    // New or replaced aTimeLogger exports in the vault folder: re-read and redraw.
+    const onFile = file => {
+      if (!file || !file.path || !/\.csv$/i.test(file.path)) return;
+      if (!normalizePath(file.path).startsWith(normalizePath(this.settings.importFolder || '') + '/')) return;
+      this.refreshBlocks();
+      this.refreshViews();
+    };
+    this.registerEvent(this.app.vault.on('create', onFile));
+    this.registerEvent(this.app.vault.on('modify', onFile));
+    this.registerEvent(this.app.vault.on('delete', onFile));
     this.addRibbonIcon('clock', 'Open weekly time log', () => this.openView());
     this.addCommand({ id: 'open', name: 'Open weekly time log', callback: () => this.openView() });
     this.addCommand({
@@ -1331,56 +1351,60 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
   }
 
   /**
-   * Record a start/stop at time `at`, which may be in the past (phone taps arrive
-   * late): whatever covers `at` ends there, and a start runs until the next entry
-   * (or keeps running if there is none).
+   * Every aTimeLogger entry from the CSVs in the import folder, de-duplicated across
+   * overlapping exports. Files are re-read only when they change.
    */
-  applyTap(tap) {
-    const list = this.settings.tracked;
-    for (const e of list) if (e.start < tap.at && (e.end == null || e.end > tap.at)) e.end = tap.at;
-    if (tap.kind === 'start') {
-      const next = list.filter(e => e.start >= tap.at).sort((a, b) => a.start - b.start)[0];
-      list.push({ id: `${tap.at.toString(36)}${Math.random().toString(36).slice(2, 6)}`, activity: tap.activity, start: tap.at, end: next ? next.start : null });
-    }
-    this.settings.tracked = list.filter(e => e.end == null || e.end - e.start >= 30 * 1000).sort((a, b) => a.start - b.start);
-  }
-
-  /** Pull phone taps from the Reminders list (Mac only). Safe to call often. */
-  async importPhone() {
-    const s = this.settings;
-    if (!s.phoneImport || !Platform.isDesktopApp || this.importing) return;
-    this.importing = true;
+  async loadImported() {
+    const folder = (this.settings.importFolder || '').trim();
+    const res = { entries: [], files: [], folder, missing: false };
+    if (!folder) return res;
+    this.importCache = this.importCache || new Map();
+    const external = /^(\/|~)/.test(folder);
+    let listing = [];
     try {
-      const res = JSON.parse(await jxa(PHONE_FETCH, [s.phoneList]));
-      if (res.missing) {
-        if (!this.warnedList) new Notice(`Tracker: create a Reminders list named "${s.phoneList}" for phone taps.`);
-        this.warnedList = true;
-        return;
+      if (external) {
+        if (!Platform.isDesktopApp) return res;
+        const fs = require('fs');
+        const path = require('path');
+        const dir = folder.replace(/^~/, require('os').homedir());
+        if (!fs.existsSync(dir)) { res.missing = true; return res; }
+        listing = fs.readdirSync(dir).filter(f => /\.csv$/i.test(f)).map(f => {
+          const full = path.join(dir, f);
+          return { path: full, name: f, mtime: fs.statSync(full).mtimeMs, read: () => fs.promises.readFile(full, 'utf8') };
+        });
+      } else {
+        const adapter = this.app.vault.adapter;
+        const dir = normalizePath(folder);
+        if (!(await adapter.exists(dir))) { res.missing = true; return res; }
+        const { files } = await adapter.list(dir);
+        for (const f of files.filter(x => /\.csv$/i.test(x))) {
+          const st = await adapter.stat(f);
+          listing.push({ path: f, name: f.split('/').pop(), mtime: st ? st.mtime : 0, read: () => adapter.read(f) });
+        }
       }
-      const seen = new Set(s.phoneSeen || []);
-      const fresh = res.items.filter(i => !seen.has(i.id) && i.created).sort((a, b) => a.created - b.created);
-      const acts = this.activities();
-      for (const it of fresh) {
-        this.applyTap(parsePhoneTap(it.name, it.created, acts));
-        seen.add(it.id);
-      }
-      if (fresh.length) {
-        s.phoneSeen = [...seen].slice(-1000);
-        await this.trackChanged();
-        new Notice(`Tracker: added ${plural(fresh.length, 'phone tap')}.`);
-      }
-      // Tick everything read, including ones a previous run imported but couldn't tick.
-      if (res.items.length) await jxa(PHONE_TICK, [s.phoneList, ...res.items.map(i => i.id)]);
     } catch (e) {
-      console.warn('Weekly Time Log: phone import failed', e);
-      if (!this.warnedImport) new Notice(`Tracker: couldn't read Reminders (${e.message}). Obsidian may need permission under System Settings → Privacy & Security → Automation.`);
-      this.warnedImport = true;
-    } finally {
-      this.importing = false;
+      console.warn('Weekly Time Log: reading the aTimeLogger folder failed', e);
+      return res;
     }
+    const seen = new Set();
+    for (const f of listing) {
+      let cached = this.importCache.get(f.path);
+      if (!cached || cached.mtime !== f.mtime) {
+        cached = { mtime: f.mtime, ...parseATimeLogger(await f.read()) };
+        this.importCache.set(f.path, cached);
+      }
+      res.files.push({ name: f.name, read: cached.read, used: cached.entries.length, skipped: cached.skipped, header: cached.header });
+      for (const e of cached.entries) {
+        const k = `${e.activity}|${e.start}|${e.end}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        res.entries.push(e);
+      }
+    }
+    return res;
   }
 
-  /** Close an entry; taps under 30 seconds count as accidental and are dropped. */
+  /** Close an entry; taps under 30 seconds count as accidental and are dropped. */  /** Close an entry; taps under 30 seconds count as accidental and are dropped. */
   finish(entry, at) {
     entry.end = at;
     if (at - entry.start < 30 * 1000) this.settings.tracked = this.settings.tracked.filter(e => e !== entry);
@@ -1417,22 +1441,29 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     this.statusEl.toggleClass('is-hidden', !run);
   }
 
-  /** Tracked entries in [start, end) as blocks: already labelled, area from the activity. */
-  trackedBlocks(start, end) {
-    const acts = new Map(this.activities().map(a => [a.name, a.area]));
+  /**
+   * Tracked time in [start, end) as blocks: entries from the Tracker panel and from
+   * aTimeLogger exports. Already labelled; the area comes from the Activities list.
+   */
+  trackedBlocks(start, end, imported = []) {
+    const acts = new Map(this.activities().map(a => [a.name.toLowerCase(), a.area]));
     const s0 = start.valueOf();
     const e0 = end.valueOf();
     const out = [];
-    for (const e of this.settings.tracked || []) {
+    const sources = [
+      ...(this.settings.tracked || []).map(e => ({ ...e, source: 'Tracked', key: `tracked|${e.id}` })),
+      ...imported.map(e => ({ ...e, source: 'aTimeLogger', key: `atl|${e.activity}|${e.start}` })),
+    ];
+    for (const e of sources) {
       const stop = e.end || Date.now();
       if (e.start >= e0 || stop <= s0 || e.start < s0) continue;
       const startM = moment(e.start);
       const endM = moment(stop);
       out.push({
-        key: `tracked|${e.id}`, altKeys: [], legacyPrefix: null,
-        calendarId: 'tracked', calendar: 'Tracked', tracked: true, running: !e.end,
-        trackedArea: acts.get(e.activity) || '',
-        title: e.activity, description: '', explicitTags: [],
+        key: e.key, altKeys: [], legacyPrefix: null,
+        calendarId: e.source === 'Tracked' ? 'tracked' : 'atimelogger', calendar: e.source, tracked: true, running: !e.end,
+        trackedArea: acts.get(e.activity.toLowerCase()) || '',
+        title: e.activity, description: e.note || '', explicitTags: [],
         start: startM, end: endM, date: startM.format('YYYY-MM-DD'),
         hours: Math.max(0, (stop - e.start) / 36e5),
       });
@@ -2190,7 +2221,8 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       this.collectBlocks(start, end),
       this.collectTasks(start.format('YYYY-MM-DD')),
     ]);
-    const tracked = this.trackedBlocks(start, end);
+    const imported = await this.loadImported();
+    const tracked = this.trackedBlocks(start, end, imported.entries);
     // Time is counted once: where tracked time overlaps a calendar block, the
     // tracked activity wins and the block keeps only the rest of its hours.
     const blocks = [];
@@ -3446,6 +3478,33 @@ class TimeLogSettings extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  /** What the import folder holds right now, and which types still need an area. */
+  async showImport(el) {
+    el.empty();
+    const res = await this.plugin.loadImported();
+    if (!res.folder) return el.setText('No folder set.');
+    if (res.missing) return el.setText(`Folder not found yet: ${res.folder}. Create it and drop exports in.`);
+    if (!res.files.length) return el.setText('No CSV files in the folder yet.');
+    for (const f of res.files) {
+      el.createDiv({
+        text: f.header
+          ? `${f.name}: ${plural(f.used, 'entry').replace('entrys', 'entries')}${f.skipped ? `, ${plural(f.skipped, 'row')} skipped (unreadable times)` : ''}`
+          : `${f.name}: no activity/from/to columns found, so nothing was read. Send me the first two lines and I'll match the format.`,
+      });
+    }
+    if (res.entries.length) {
+      const span = [Math.min(...res.entries.map(e => e.start)), Math.max(...res.entries.map(e => e.end))];
+      el.createDiv({ text: `${res.entries.length} entries, ${moment(span[0]).format('MMM YYYY')} – ${moment(span[1]).format('MMM YYYY')}.` });
+    }
+    const mapped = new Set(this.plugin.activities().filter(a => a.area).map(a => a.name.toLowerCase()));
+    const hours = new Map();
+    for (const e of res.entries) if (!mapped.has(e.activity.toLowerCase())) bump(hours, e.activity, (e.end - e.start) / 36e5);
+    if (hours.size) {
+      const top = [...hours].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([n, h]) => `${n} (${Math.round(h)} h)`);
+      el.createDiv({ text: `Types without an area (add "Type: Area" lines above): ${top.join(', ')}${hours.size > 12 ? ', …' : ''}` });
+    }
+  }
+
   async display() {
     const { containerEl } = this;
     const s = this.plugin.settings;
@@ -3505,9 +3564,9 @@ class TimeLogSettings extends PluginSettingTab {
       });
 
     const ac = new Setting(containerEl)
-      .setName('Tracker activities')
-      .setDesc('One per line: "Activity: Area" (the area must match one above). Tapping one in the Tracker ' +
-        'starts it and stops whatever was running. Reload the plugin to get "Track: …" commands for new ones.')
+      .setName('Activities')
+      .setDesc('One per line: "Activity: Area" (the area must match one above). Sorts aTimeLogger types into areas, ' +
+        'and gives the Tracker panel its buttons. Reload the plugin to get "Track: …" commands for new ones.')
       .addTextArea(t => {
         t.setValue(s.activities || '').onChange(async v => {
           s.activities = v;
@@ -3519,17 +3578,18 @@ class TimeLogSettings extends PluginSettingTab {
       });
     ac.settingEl.addClass('wtl-setting-wide');
 
-    new Setting(containerEl)
-      .setName('Phone taps via Apple Reminders')
-      .setDesc('On your iPhone, make one Shortcut per activity that adds a reminder named after it ("Eating", ' +
-        'and one named "Stop") to the list below. The Mac imports them at the time you tapped and ticks them off. ' +
-        '"Eating 20m ago" or "Eating at 12:30" fix the time. Mac only; Obsidian needs Automation permission for Reminders.')
-      .addToggle(t => t.setValue(s.phoneImport).onChange(async v => { s.phoneImport = v; await this.plugin.saveSettings(); }))
-      .addText(t => t.setPlaceholder('Time Tracker').setValue(s.phoneList).onChange(async v => {
-        s.phoneList = v.trim() || 'Time Tracker';
+    const imp = new Setting(containerEl)
+      .setName('aTimeLogger exports')
+      .setDesc('Folder with aTimeLogger CSV exports: a vault folder, or a full path on this Mac (e.g. an iCloud Drive folder). ' +
+        'Every CSV in it is read; overlapping exports are fine. Types are sorted into areas with the Activities list above.')
+      .addText(t => t.setPlaceholder('Time Logs/aTimeLogger').setValue(s.importFolder || '').onChange(async v => {
+        s.importFolder = v.trim();
+        this.plugin.importCache = null;
         await this.plugin.saveSettings();
       }))
-      .addButton(b => b.setButtonText('Import now').onClick(() => this.plugin.importPhone()));
+      .addButton(b => b.setButtonText('Check').onClick(() => this.showImport(status)));
+    const status = imp.settingEl.createDiv({ cls: 'wtl-import-status wtl-muted' });
+    this.showImport(status);
 
     const tg = new Setting(containerEl)
       .setName('Tag groupings')
