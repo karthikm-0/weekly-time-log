@@ -31,6 +31,13 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 
 Whenever a `time-log` block is shown, its week's CSV is saved to the export folder and re-saved each time a label changes (unchanged files aren't rewritten). Once a day (the first time Obsidian is open), last week's CSV is also saved and, if anything is unreviewed, a reminder appears. Reviewing re-saves the CSV. Both can be turned off in settings. The background check never opens the access dialog and never saves an empty week.
 
+## Tracker (aTimeLogger-style)
+
+For time that never goes on the calendar (eating, hygiene, exercise, non-work). Activities are set in Settings → *Tracker activities*, one per line as `Activity: Area`. Tracked time goes straight into the log with its area, never needs review, shows in every chart and the CSV (calendar "Tracked"), and wins over any calendar block it overlaps, so nothing is counted twice.
+
+- **From the phone (no Obsidian needed):** make one iOS Shortcut per activity, plus one called Stop, each with a single *Add New Reminder* action: title = the activity name, list = **Time Tracker**. Put them on the home screen, a widget or the Action button. The Mac imports them at the time you tapped (on startup, when Obsidian comes to the front, and every 2 minutes) and ticks them off. `Eating 20m ago` or `Eating at 12:30` fix the time.
+- **On the Mac:** the Tracker panel (timer icon, or *Open tracker*) has big buttons, the running timer, Stop, today's entries (tap to edit) and *+ Add past entry*. `Track: <activity>` commands and a status-bar timer too. A `show: tracker` block puts the panel in a note.
+
 ## Which calendars count
 
 Every Full Calendar calendar is included except its Tasks calendar; switch any off under Settings → *Calendars to log*. Calendars you add later are included automatically. If anything in the week doesn't become a block (a calendar you switched off, all-day events, a repeat pattern the plugin can't follow), the log says "N calendar events not shown — why?" with the details per calendar.

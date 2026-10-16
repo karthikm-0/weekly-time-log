@@ -1,11 +1,12 @@
 'use strict';
 
 const {
-  Plugin, ItemView, Modal, AbstractInputSuggest, MarkdownRenderChild, Notice, PluginSettingTab, Setting, moment,
-  normalizePath, prepareFuzzySearch, getAllTags, TFile,
+  Plugin, ItemView, Modal, AbstractInputSuggest, Component, MarkdownRenderChild, Notice, PluginSettingTab, Setting, moment,
+  normalizePath, prepareFuzzySearch, getAllTags, TFile, Platform,
 } = require('obsidian');
 
 const VIEW_TYPE = 'weekly-time-log-view';
+const TRACKER_VIEW = 'weekly-time-log-tracker';
 const FC_ID = 'full-calendar-remastered';
 
 // Storage is split so a plugin reinstall/upgrade never loses your labels:
@@ -35,6 +36,13 @@ const DEFAULTS = {
   ].join('\n'),
   defaultTaskArea: 'Work', // area for blocks attached to a task when nothing else says otherwise
   areaLabels: {},          // blockKey -> { area, title, tags }: confirmed areas, also training data
+  // Tracker (aTimeLogger-style): one tap starts an activity. "Activity: Area" per line.
+  activities: ['Eating: Meals', 'Hygiene: Personal', 'Exercise: Exercise', 'Non-work: Personal'].join('\n'),
+  tracked: [],             // { id, activity, start (ms), end (ms | null while running) }
+  // Phone taps: an iOS Shortcut adds a reminder ("Eating", "Stop") to this list; the Mac imports it.
+  phoneImport: true,
+  phoneList: 'Time Tracker',
+  phoneSeen: [],           // reminder ids already imported (so a failed tick never imports twice)
   view: null,            // last grouping picked in the full log
   minScore: 0.55,
   autoExport: true,      // save last week's CSV daily, and re-save after reviewing
@@ -915,11 +923,269 @@ function blockKeys(calendarId, ev, startM, occurrence) {
   return { key: `${calendarId}|${ev.uid}`, altKeys, legacyPrefix: `${calendarId}|${ev.uid}|` };
 }
 
+// ---------------------------------------------------------------------------
+// Tracker: tap an activity to start it (stops whatever was running)
+
+// Apple Reminders, via JavaScript for Automation (Mac only), like the Reminders Inbox plugin.
+const PHONE_FETCH = `function run(argv) {
+  const lists = Application('Reminders').lists.whose({ name: argv[0] })();
+  if (!lists.length) return JSON.stringify({ missing: true });
+  const rs = lists[0].reminders.whose({ completed: false });
+  const ids = rs.id(), names = rs.name(), made = rs.creationDate();
+  return JSON.stringify({ items: ids.map((id, i) => ({ id: id, name: names[i] || '', created: made[i] ? made[i].getTime() : null })) });
+}`;
+const PHONE_TICK = `function run(argv) {
+  const lists = Application('Reminders').lists.whose({ name: argv[0] })();
+  const done = [];
+  if (!lists.length) return JSON.stringify(done);
+  for (const id of argv.slice(1)) {
+    try { lists[0].reminders.byId(id).completed = true; done.push(id); } catch (e) {}
+  }
+  return JSON.stringify(done);
+}`;
+
+function jxa(script, args) {
+  const { execFile } = require('child_process');
+  return new Promise((resolve, reject) => {
+    execFile('osascript', ['-l', 'JavaScript', '-e', script, ...args], { timeout: 60000, maxBuffer: 4 << 20 }, (err, out, errOut) => {
+      if (err) reject(new Error(String(errOut || err.message).trim()));
+      else resolve(out.trim());
+    });
+  });
+}
+
+/**
+ * A phone tap, from the reminder's title and creation time:
+ *   "Eating"                 start Eating when the reminder was made
+ *   "Stop" / "Done"          stop whatever is running
+ *   "Eating 20m ago"         start 20 minutes earlier
+ *   "Eating at 12:30"        start at 12:30 (the latest 12:30 before the tap)
+ * Names match activities case-insensitively ("eat" -> Eating); unknown names are kept as typed.
+ */
+function parsePhoneTap(title, created, activities) {
+  let t = String(title || '').replace(/\s+/g, ' ').trim();
+  let at = created;
+  let m = t.match(/\s+(\d+(?:\.\d+)?)\s*(m|min|mins|minutes?|h|hr|hrs|hours?)\s+ago$/i);
+  if (m) {
+    at -= Number(m[1]) * (/^h/i.test(m[2]) ? 3600e3 : 60e3);
+    t = t.slice(0, m.index).trim();
+  } else if ((m = t.match(/\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i))) {
+    const made = moment(created);
+    let h = Number(m[1]) % 12;
+    const min = Number(m[2] || 0);
+    const options = m[3] ? [h + (m[3].toLowerCase() === 'pm' ? 12 : 0)] : [h, h + 12];
+    // The latest matching time at or before the tap (today, else yesterday).
+    const cands = [];
+    for (const day of [0, -1]) for (const hh of options) cands.push(made.clone().add(day, 'day').hour(hh).minute(min).second(0).millisecond(0).valueOf());
+    at = Math.max(...cands.filter(c => c <= created + 60e3), created - 24 * 3600e3);
+    t = t.slice(0, m.index).trim();
+  }
+  if (/^(stop|done|end|off|finish(ed)?)$/i.test(t)) return { kind: 'stop', at };
+  const low = t.toLowerCase();
+  const act = activities.find(a => a.name.toLowerCase() === low)
+    || (low.length >= 3 && activities.find(a => a.name.toLowerCase().startsWith(low)));
+  return { kind: 'start', activity: act ? act.name : t, at };
+}
+
+/** "Eating: Meals" -> { name: 'Eating', area: 'Meals' } */
+function parseActivities(text) {
+  const out = [];
+  for (const line of (text || '').split('\n')) {
+    const i = line.indexOf(':');
+    const name = (i < 0 ? line : line.slice(0, i)).trim();
+    if (!name || out.some(a => a.name.toLowerCase() === name.toLowerCase())) continue;
+    out.push({ name, area: i < 0 ? '' : line.slice(i + 1).trim() });
+  }
+  return out;
+}
+
+function fmtDuration(ms) {
+  const m = Math.max(0, Math.floor(ms / 60000));
+  return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m` : `${m}m`;
+}
+
+function fmtClock(ms) {
+  const t = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = t % 60;
+  return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
+/**
+ * The tracker panel (sidebar view and "show: tracker" blocks). `owner` is a
+ * Component, so the live timer stops when the panel goes away.
+ */
+function renderTracker(el, plugin, owner) {
+  el.empty();
+  el.addClass('wtl-tracker');
+  const acts = plugin.activities();
+  const color = plugin.colorsFor({ blocks: [] }, findDimension(plugin.settings, 'area'));
+  const areaOf = name => (acts.find(a => a.name === name) || {}).area;
+  const dot = (parent, activity) => {
+    const d = parent.createSpan({ cls: 'wtl-swatch' });
+    const area = areaOf(activity);
+    paint(d, color, area && hasColor(color, area) ? area : '~other');
+  };
+
+  // Now running
+  const run = plugin.running();
+  const now = el.createDiv({ cls: 'wtl-tracker-now' + (run ? ' is-running' : '') });
+  if (run) {
+    const left = now.createDiv({ cls: 'wtl-tracker-now-main' });
+    const name = left.createDiv({ cls: 'wtl-tracker-now-name' });
+    dot(name, run.activity);
+    name.createSpan({ text: run.activity });
+    left.createDiv({ cls: 'wtl-muted', text: `since ${moment(run.start).format('h:mma')}` });
+    const clock = now.createDiv({ cls: 'wtl-tracker-clock', text: fmtClock(Date.now() - run.start) });
+    owner.registerInterval(window.setInterval(() => clock.setText(fmtClock(Date.now() - run.start)), 1000));
+    const stop = now.createEl('button', { cls: 'mod-warning wtl-tracker-stop', text: 'Stop' });
+    stop.onclick = () => plugin.stopActivity();
+  } else {
+    now.createDiv({ cls: 'wtl-muted', text: 'Not tracking. Tap an activity to start.' });
+  }
+
+  // Activity buttons: tapping another one switches
+  const grid = el.createDiv({ cls: 'wtl-tracker-grid' });
+  for (const a of acts) {
+    const b = grid.createEl('button', { cls: 'wtl-tracker-act' + (run && run.activity === a.name ? ' is-active' : '') });
+    dot(b, a.name);
+    b.createSpan({ text: a.name });
+    b.onclick = () => plugin.startActivity(a.name);
+  }
+  if (!acts.length) grid.createDiv({ cls: 'wtl-muted', text: 'Add activities in settings (e.g. "Eating: Meals").' });
+
+  // Today
+  const today = moment().startOf('day').valueOf();
+  const entries = plugin.settings.tracked.filter(e => (e.end || Date.now()) > today).sort((x, y) => y.start - x.start);
+  const head = el.createDiv({ cls: 'wtl-tracker-head' });
+  head.createSpan({ cls: 'wtl-tracker-title', text: 'Today' });
+  const add = head.createEl('button', { cls: 'wtl-tracker-add', text: '+ Add past entry' });
+  add.onclick = () => new TrackEntryModal(plugin.app, plugin, null).open();
+
+  const totals = new Map();
+  for (const e of entries) bump(totals, e.activity, (e.end || Date.now()) - Math.max(e.start, today));
+  if (totals.size) {
+    const t = el.createDiv({ cls: 'wtl-tracker-totals' });
+    for (const [act, ms] of [...totals].sort((x, y) => y[1] - x[1])) {
+      const it = t.createSpan({ cls: 'wtl-legend-item' });
+      dot(it, act);
+      it.createSpan({ text: act });
+      it.createSpan({ cls: 'wtl-legend-value', text: fmtDuration(ms) });
+    }
+  }
+  const list = el.createDiv({ cls: 'wtl-tracker-list' });
+  if (!entries.length) list.createDiv({ cls: 'wtl-muted', text: 'Nothing tracked yet today.' });
+  for (const e of entries) {
+    const row = list.createDiv({ cls: 'wtl-tracker-row' + (e.end ? '' : ' is-running') });
+    row.createSpan({ cls: 'wtl-agenda-time', text: `${moment(e.start).format('h:mm')}–${e.end ? moment(e.end).format('h:mma') : 'now'}` });
+    const n = row.createSpan({ cls: 'wtl-tracker-row-name' });
+    dot(n, e.activity);
+    n.createSpan({ text: e.activity });
+    row.createSpan({ cls: 'wtl-agenda-hours', text: fmtDuration((e.end || Date.now()) - e.start) });
+    row.setAttr('aria-label', 'Edit');
+    row.onclick = () => new TrackEntryModal(plugin.app, plugin, e).open();
+  }
+}
+
+/** Add or fix a tracked entry: activity, start, end (empty end = still running). */
+class TrackEntryModal extends Modal {
+  constructor(app, plugin, entry) {
+    super(app);
+    this.plugin = plugin;
+    this.entry = entry;
+  }
+
+  onOpen() {
+    const el = this.contentEl;
+    el.addClass('wtl-track-edit');
+    el.createEl('h3', { text: this.entry ? 'Edit entry' : 'Add past entry' });
+    const acts = this.plugin.activities();
+    const e = this.entry || { activity: (acts[0] || {}).name, start: Date.now() - 30 * 60000, end: Date.now() };
+    const field = label => {
+      const row = el.createDiv({ cls: 'wtl-track-field' });
+      row.createSpan({ text: label });
+      return row;
+    };
+    const sel = field('Activity').createEl('select', { cls: 'dropdown' });
+    for (const a of acts) sel.createEl('option', { text: a.name, value: a.name });
+    if (e.activity && !acts.some(a => a.name === e.activity)) sel.createEl('option', { text: e.activity, value: e.activity });
+    sel.value = e.activity;
+    const fmt = ms => moment(ms).format('YYYY-MM-DDTHH:mm');
+    const start = field('Start').createEl('input', { type: 'datetime-local', value: fmt(e.start) });
+    const end = field('End').createEl('input', { type: 'datetime-local', value: e.end ? fmt(e.end) : '' });
+    if (this.entry && !this.entry.end) el.createDiv({ cls: 'wtl-muted', text: 'Running: leave End empty to keep it going.' });
+    const err = el.createDiv({ cls: 'wtl-error' });
+
+    const btns = el.createDiv({ cls: 'wtl-review-buttons wtl-track-buttons' });
+    if (this.entry) {
+      btns.createEl('button', { cls: 'mod-warning', text: 'Delete' }).onclick = async () => {
+        await this.plugin.saveTracked(this.entry, null);
+        this.close();
+      };
+    }
+    btns.createEl('button', { cls: 'mod-cta', text: 'Save' }).onclick = async () => {
+      const s0 = moment(start.value, 'YYYY-MM-DDTHH:mm');
+      const e0 = end.value ? moment(end.value, 'YYYY-MM-DDTHH:mm') : null;
+      if (!s0.isValid()) return err.setText('Start time is missing.');
+      if (e0 && !e0.isAfter(s0)) return err.setText('End has to be after start.');
+      if (!e0 && this.entry && this.entry.end) return err.setText('End time is missing.');
+      if (!e0 && !this.entry) return err.setText('End time is missing.');
+      await this.plugin.saveTracked(this.entry, { activity: sel.value, start: s0.valueOf(), end: e0 ? e0.valueOf() : null });
+      this.close();
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+class TrackerView extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+
+  getViewType() { return TRACKER_VIEW; }
+  getDisplayText() { return 'Tracker'; }
+  getIcon() { return 'timer'; }
+
+  async onOpen() {
+    this.draw();
+  }
+
+  draw() {
+    // A fresh child per draw, so the old live timer stops.
+    if (this.panel) this.removeChild(this.panel);
+    this.panel = this.addChild(new MarkdownRenderChild(this.contentEl));
+    renderTracker(this.contentEl, this.plugin, this.panel);
+  }
+}
+
 module.exports = class WeeklyTimeLogPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
     this.registerView(VIEW_TYPE, leaf => new TimeLogView(leaf, this));
+    this.registerView(TRACKER_VIEW, leaf => new TrackerView(leaf, this));
+    this.addRibbonIcon('timer', 'Open tracker', () => this.openTracker());
+    this.addCommand({ id: 'open-tracker', name: 'Open tracker', callback: () => this.openTracker() });
+    this.addCommand({ id: 'track-stop', name: 'Track: stop', callback: () => this.stopActivity() });
+    // One command per activity (bind to hotkeys / the mobile toolbar). New activities need a reload.
+    for (const a of this.activities()) {
+      this.addCommand({ id: `track-${a.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, name: `Track: ${a.name}`, callback: () => this.startActivity(a.name) });
+    }
+    this.statusEl = this.addStatusBarItem();
+    this.statusEl.addClass('wtl-status-timer');
+    this.statusEl.onclick = () => this.openTracker();
+    this.updateStatusBar();
+    this.registerInterval(window.setInterval(() => this.updateStatusBar(), 30 * 1000));
+    if (Platform.isDesktopApp) {
+      this.app.workspace.onLayoutReady(() => window.setTimeout(() => this.importPhone(), 5000));
+      this.registerDomEvent(window, 'focus', () => this.importPhone());
+      this.registerInterval(window.setInterval(() => this.importPhone(), 2 * 60 * 1000));
+    }
     this.addRibbonIcon('clock', 'Open weekly time log', () => this.openView());
     this.addCommand({ id: 'open', name: 'Open weekly time log', callback: () => this.openView() });
     this.addCommand({
@@ -1025,6 +1291,153 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
   onunload() {
     if (this.probeHost) this.probeHost.remove();
+  }
+
+  // ---- Tracker -------------------------------------------------------------
+
+  activities() {
+    return parseActivities(this.settings.activities);
+  }
+
+  running() {
+    return (this.settings.tracked || []).find(e => !e.end) || null;
+  }
+
+  async openTracker() {
+    let leaf = this.app.workspace.getLeavesOfType(TRACKER_VIEW)[0];
+    if (!leaf) {
+      leaf = this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf('tab');
+      await leaf.setViewState({ type: TRACKER_VIEW, active: true });
+    }
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  /** Start an activity; whatever was running stops at the same moment. */
+  async startActivity(name) {
+    const now = Date.now();
+    const run = this.running();
+    if (run && run.activity === name) return;
+    if (run) this.finish(run, now);
+    this.settings.tracked.push({ id: `${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`, activity: name, start: now, end: null });
+    await this.trackChanged();
+    new Notice(`Tracking ${name}`);
+  }
+
+  async stopActivity() {
+    const run = this.running();
+    if (!run) return new Notice('Nothing is being tracked.');
+    this.finish(run, Date.now());
+    await this.trackChanged();
+  }
+
+  /**
+   * Record a start/stop at time `at`, which may be in the past (phone taps arrive
+   * late): whatever covers `at` ends there, and a start runs until the next entry
+   * (or keeps running if there is none).
+   */
+  applyTap(tap) {
+    const list = this.settings.tracked;
+    for (const e of list) if (e.start < tap.at && (e.end == null || e.end > tap.at)) e.end = tap.at;
+    if (tap.kind === 'start') {
+      const next = list.filter(e => e.start >= tap.at).sort((a, b) => a.start - b.start)[0];
+      list.push({ id: `${tap.at.toString(36)}${Math.random().toString(36).slice(2, 6)}`, activity: tap.activity, start: tap.at, end: next ? next.start : null });
+    }
+    this.settings.tracked = list.filter(e => e.end == null || e.end - e.start >= 30 * 1000).sort((a, b) => a.start - b.start);
+  }
+
+  /** Pull phone taps from the Reminders list (Mac only). Safe to call often. */
+  async importPhone() {
+    const s = this.settings;
+    if (!s.phoneImport || !Platform.isDesktopApp || this.importing) return;
+    this.importing = true;
+    try {
+      const res = JSON.parse(await jxa(PHONE_FETCH, [s.phoneList]));
+      if (res.missing) {
+        if (!this.warnedList) new Notice(`Tracker: create a Reminders list named "${s.phoneList}" for phone taps.`);
+        this.warnedList = true;
+        return;
+      }
+      const seen = new Set(s.phoneSeen || []);
+      const fresh = res.items.filter(i => !seen.has(i.id) && i.created).sort((a, b) => a.created - b.created);
+      const acts = this.activities();
+      for (const it of fresh) {
+        this.applyTap(parsePhoneTap(it.name, it.created, acts));
+        seen.add(it.id);
+      }
+      if (fresh.length) {
+        s.phoneSeen = [...seen].slice(-1000);
+        await this.trackChanged();
+        new Notice(`Tracker: added ${plural(fresh.length, 'phone tap')}.`);
+      }
+      // Tick everything read, including ones a previous run imported but couldn't tick.
+      if (res.items.length) await jxa(PHONE_TICK, [s.phoneList, ...res.items.map(i => i.id)]);
+    } catch (e) {
+      console.warn('Weekly Time Log: phone import failed', e);
+      if (!this.warnedImport) new Notice(`Tracker: couldn't read Reminders (${e.message}). Obsidian may need permission under System Settings → Privacy & Security → Automation.`);
+      this.warnedImport = true;
+    } finally {
+      this.importing = false;
+    }
+  }
+
+  /** Close an entry; taps under 30 seconds count as accidental and are dropped. */
+  finish(entry, at) {
+    entry.end = at;
+    if (at - entry.start < 30 * 1000) this.settings.tracked = this.settings.tracked.filter(e => e !== entry);
+  }
+
+  /** Edit (`patch`), delete (`patch` = null) or add (`entry` = null) a tracked entry. */
+  async saveTracked(entry, patch) {
+    const list = this.settings.tracked;
+    if (!entry) {
+      list.push({ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, ...patch });
+    } else if (!patch) {
+      this.settings.tracked = list.filter(e => e.id !== entry.id);
+    } else {
+      // Ending a running entry here, or restarting one: at most one runs at a time.
+      if (!patch.end) for (const e of list) if (e !== entry && !e.end) e.end = patch.start;
+      Object.assign(entry, patch);
+    }
+    this.settings.tracked.sort((a, b) => a.start - b.start);
+    await this.trackChanged();
+  }
+
+  async trackChanged() {
+    await this.saveSettings();
+    this.updateStatusBar();
+    for (const leaf of this.app.workspace.getLeavesOfType(TRACKER_VIEW)) leaf.view.draw();
+    this.refreshBlocks();
+    this.refreshViews();
+  }
+
+  updateStatusBar() {
+    if (!this.statusEl) return;
+    const run = this.running();
+    this.statusEl.setText(run ? `⏱ ${run.activity} ${fmtDuration(Date.now() - run.start)}` : '');
+    this.statusEl.toggleClass('is-hidden', !run);
+  }
+
+  /** Tracked entries in [start, end) as blocks: already labelled, area from the activity. */
+  trackedBlocks(start, end) {
+    const acts = new Map(this.activities().map(a => [a.name, a.area]));
+    const s0 = start.valueOf();
+    const e0 = end.valueOf();
+    const out = [];
+    for (const e of this.settings.tracked || []) {
+      const stop = e.end || Date.now();
+      if (e.start >= e0 || stop <= s0 || e.start < s0) continue;
+      const startM = moment(e.start);
+      const endM = moment(stop);
+      out.push({
+        key: `tracked|${e.id}`, altKeys: [], legacyPrefix: null,
+        calendarId: 'tracked', calendar: 'Tracked', tracked: true, running: !e.end,
+        trackedArea: acts.get(e.activity) || '',
+        title: e.activity, description: '', explicitTags: [],
+        start: startM, end: endM, date: startM.format('YYYY-MM-DD'),
+        hours: Math.max(0, (stop - e.start) / 36e5),
+      });
+    }
+    return out;
   }
 
   // ---- Background export & reminder ---------------------------------------
@@ -1583,6 +1996,15 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
   assign(report) {
     const byKey = new Map(report.tasks.map(t => [t.key, t]));
     for (const b of report.blocks) {
+      if (b.tracked) {
+        // Tracked activities are life admin, not task work, and never need review.
+        b.status = 'confirmed';
+        b.choice = { kind: 'none' };
+        b.tasks = [];
+        b.task = null;
+        b.tags = [];
+        continue;
+      }
       const a = this.resolveLabel(this.settings.annotations, b);
       if (a) {
         b.status = 'confirmed';
@@ -1665,6 +2087,12 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const defaultArea = names.get((this.settings.defaultTaskArea || '').toLowerCase()) || null;
 
     for (const b of report.blocks) {
+      if (b.tracked) {
+        b.area = names.get((b.trackedArea || '').toLowerCase()) || null;
+        b.areaStatus = 'confirmed';
+        b.areaWhy = [];
+        continue;
+      }
       const confirmed = this.resolveLabel(this.settings.areaLabels, b);
       if (confirmed && names.has(confirmed.area.toLowerCase())) {
         b.area = names.get(confirmed.area.toLowerCase());
@@ -1758,10 +2186,26 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
   async buildReport(offset = 0, anchor = null) {
     const { start, end } = await this.weekBounds(offset, anchor);
-    const [{ blocks, calendars }, tasks] = await Promise.all([
+    const [{ blocks: calBlocks, calendars }, tasks] = await Promise.all([
       this.collectBlocks(start, end),
       this.collectTasks(start.format('YYYY-MM-DD')),
     ]);
+    const tracked = this.trackedBlocks(start, end);
+    // Time is counted once: where tracked time overlaps a calendar block, the
+    // tracked activity wins and the block keeps only the rest of its hours.
+    const blocks = [];
+    for (const b of calBlocks) {
+      let overlap = 0;
+      for (const t of tracked) overlap += Math.max(0, Math.min(b.end, t.end) - Math.max(b.start, t.start));
+      if (overlap) {
+        b.trimmedHours = overlap / 36e5;
+        b.hours = Math.max(0, b.hours - b.trimmedHours);
+        if (b.hours < 1 / 60) continue;
+      }
+      blocks.push(b);
+    }
+    blocks.push(...tracked);
+    blocks.sort((a, b) => a.start.valueOf() - b.start.valueOf());
     return this.rescore({ start, end, blocks, tasks, calendars, tagCounts: this.collectVaultTags() });
   }
 
@@ -2503,7 +2947,7 @@ class TimeLogView extends ItemView {
 //
 //   week: this | last | 2026-09-28 | 2026-W40   (default: from the note's filename, else this week)
 //   group: Project | Role | tag | task | calendar | none   (default: last view picked in the full log)
-//   show: full | chart | hours | days | timeline | agenda (default: full)
+//   show: full | chart | hours | days | timeline | agenda | tracker (default: full)
 //   from: today                                  (agenda: hide days before today)
 //   buttons: false                               (hide Review / Export / Open full log)
 
@@ -2564,6 +3008,11 @@ class TimeLogBlock extends MarkdownRenderChild {
     const el = this.containerEl;
     el.empty();
     el.addClass('wtl-block');
+    if ((this.opts.show || '').toLowerCase() === 'tracker') {
+      if (this.panel) this.removeChild(this.panel);
+      this.panel = this.addChild(new Component());
+      return renderTracker(el, this.plugin, this.panel);
+    }
     let report;
     try {
       this.week = this.resolveWeek();
@@ -3054,6 +3503,33 @@ class TimeLogSettings extends PluginSettingTab {
         for (const a of parseAreas(s.areas)) d.addOption(a.name, a.name);
         d.setValue(s.defaultTaskArea || '').onChange(async v => { s.defaultTaskArea = v; await this.plugin.saveSettings(); });
       });
+
+    const ac = new Setting(containerEl)
+      .setName('Tracker activities')
+      .setDesc('One per line: "Activity: Area" (the area must match one above). Tapping one in the Tracker ' +
+        'starts it and stops whatever was running. Reload the plugin to get "Track: …" commands for new ones.')
+      .addTextArea(t => {
+        t.setValue(s.activities || '').onChange(async v => {
+          s.activities = v;
+          await this.plugin.saveSettings();
+          for (const leaf of this.app.workspace.getLeavesOfType(TRACKER_VIEW)) leaf.view.draw();
+        });
+        t.inputEl.rows = 5;
+        t.inputEl.addClass('wtl-groups-input');
+      });
+    ac.settingEl.addClass('wtl-setting-wide');
+
+    new Setting(containerEl)
+      .setName('Phone taps via Apple Reminders')
+      .setDesc('On your iPhone, make one Shortcut per activity that adds a reminder named after it ("Eating", ' +
+        'and one named "Stop") to the list below. The Mac imports them at the time you tapped and ticks them off. ' +
+        '"Eating 20m ago" or "Eating at 12:30" fix the time. Mac only; Obsidian needs Automation permission for Reminders.')
+      .addToggle(t => t.setValue(s.phoneImport).onChange(async v => { s.phoneImport = v; await this.plugin.saveSettings(); }))
+      .addText(t => t.setPlaceholder('Time Tracker').setValue(s.phoneList).onChange(async v => {
+        s.phoneList = v.trim() || 'Time Tracker';
+        await this.plugin.saveSettings();
+      }))
+      .addButton(b => b.setButtonText('Import now').onClick(() => this.plugin.importPhone()));
 
     const tg = new Setting(containerEl)
       .setName('Tag groupings')
