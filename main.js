@@ -1388,7 +1388,7 @@ function proposeBlocks(free, need, size) {
 
 /** What a Coming up panel remembers between redraws. */
 function upcomingState() {
-  return { folded: new Set(['undated']), day: null, more: false, open: new Set() };
+  return { folded: new Set(['undated']), day: null, more: false, open: new Set(), details: new Set() };
 }
 
 /**
@@ -1439,7 +1439,7 @@ function renderUpcoming(el, plugin, data, state, { redraw, refresh = null }) {
     const list = upSection(root, state, id, title, items.length, redraw);
     if (!list) continue;
     const shown = id === 'later' && !state.more ? items.slice(0, LATER_SHOWN) : items;
-    for (const it of shown) upcomingRow(list, plugin, it, data, { quiet: id === 'plan' });
+    for (const it of shown) upcomingRow(list, plugin, it, data, { section: id, state, redraw });
     if (shown.length < items.length) {
       const more = list.createDiv({ cls: 'wtl-up-more', text: `${items.length - shown.length} more` });
       more.onclick = () => { state.more = true; redraw(); };
@@ -1501,33 +1501,58 @@ function renderHorizon(root, data, state, redraw) {
   }
 }
 
-/** One task. `quiet`: offer "no plan needed" (in the Needs a plan section). */
-function upcomingRow(list, plugin, it, data, { quiet = false } = {}) {
+/** Days a task can be moved to, as a menu at the mouse. */
+function moveMenu(plugin, it, data, e) {
+  const t = it.task;
+  const menu = new Menu();
+  const today = moment().startOf('day');
+  const day = (label, d) => menu.addItem(i => i
+    .setTitle(`${label} · ${d.format('ddd MMM D')}`)
+    .onClick(() => plugin.setTaskDate(t, d.format('YYYY-MM-DD'))));
+  if (it.bucket !== 'today') day('Today', today.clone());
+  if (it.bucket !== 'tomorrow') day('Tomorrow', today.clone().add(1, 'day'));
+  day('In 3 days', today.clone().add(3, 'days'));
+  day('Next week', moment(data.weekStart).add(7, 'days'));
+  day('In 2 weeks', today.clone().add(14, 'days'));
+  day('In a month', today.clone().add(1, 'month'));
+  if (it.date) {
+    menu.addSeparator();
+    menu.addItem(i => i.setTitle('Remove date').onClick(() => plugin.setTaskDate(t, '')));
+  }
+  menu.showAtMouseEvent(e);
+}
+
+/**
+ * One task. Click the text to open its note; double-click the line for its details.
+ * `section`: where it's listed (a task can be in Needs a plan and in its day's section).
+ */
+function upcomingRow(list, plugin, it, data, { section, state, redraw }) {
   const t = it.task;
   const h = it.hours;
-  const row = list.createDiv({ cls: 'wtl-up-row' });
+  const detailKey = `${section}|${t.key}`;
+  const open = state.details.has(detailKey);
+  const row = list.createDiv({ cls: 'wtl-up-row' + (open ? ' is-open' : '') });
   const cb = row.createEl('input', { type: 'checkbox', cls: 'task-list-item-checkbox' });
   cb.onclick = e => { e.stopPropagation(); plugin.completeTask(t); };
-  // The first tag with a colour, as a dot; the tags themselves are in the tooltip.
+  // The first tag with a colour, as a dot; the tags themselves are in the details.
   const dot = row.createSpan({ cls: 'wtl-up-dot' });
   const color = t.tags.map(tg => plugin.tagColor(tg)).find(Boolean);
   if (color) dot.style.background = color;
 
   const text = row.createSpan({ cls: 'wtl-up-text', text: t.desc });
-  text.onclick = () => plugin.openTask(t);
-  const tip = [t.desc];
-  if (t.tags.length) tip.push(t.tags.map(x => `#${x}`).join(' '));
-  if (t.scheduled) tip.push(`Scheduled ${moment(t.scheduled).format('ddd MMM D')}`);
-  if (t.due) tip.push(`Due ${moment(t.due).format('ddd MMM D')}`);
-  if (h && h.logged) tip.push(`${fmtHours1(h.logged)} h logged${h.unreviewed ? ` (${fmtHours1(h.unreviewed)} h not reviewed yet)` : ''}`);
-  if (h && h.booked) {
-    tip.push(`${fmtHours1(h.booked)} h booked on your calendar${it.date && it.bucket !== 'late' ? ' by then' : ''}:`);
-    const ahead = h.ahead || [];
-    for (const b of ahead.slice(0, 3)) tip.push(`  ${b.start.format('ddd MMM D H:mm')} ${b.title} (${fmtSpan(b.hours)})`);
-    if (ahead.length > 3) tip.push(`  and ${ahead.length - 3} more`);
-  }
-  tip.push(t.path.replace(/\.md$/, ''));
-  text.setAttr('aria-label', tip.join('\n'));
+  text.setAttr('aria-label', `${t.desc}\nClick to open · double-click for details`);
+  // A single click waits a moment, so a double-click doesn't also open the note.
+  let clickTimer = null;
+  text.onclick = () => {
+    window.clearTimeout(clickTimer);
+    clickTimer = window.setTimeout(() => plugin.openTask(t), 250);
+  };
+  row.ondblclick = e => {
+    window.clearTimeout(clickTimer);
+    e.preventDefault();
+    if (open) state.details.delete(detailKey); else state.details.add(detailKey);
+    redraw();
+  };
 
   if (h && (h.logged || h.booked)) {
     const hrs = row.createSpan({ cls: 'wtl-up-hours' });
@@ -1546,33 +1571,68 @@ function upcomingRow(list, plugin, it, data, { quiet = false } = {}) {
     plan.setAttr('aria-label', 'Nothing booked for this yet: book time');
   }
   plan.onclick = e => { e.stopPropagation(); new PlanModal(plugin, it).open(); };
-  if (quiet) {
+  if (section === 'plan') {
     const mute = row.createSpan({ cls: 'clickable-icon wtl-up-mute', attr: { 'aria-label': 'Small: no plan needed' } });
     setIcon(mute, 'bell-off');
     mute.onclick = e => { e.stopPropagation(); plugin.setNoPlanNeeded(t, true); };
   }
 
-  const push =row.createSpan({ cls: 'clickable-icon wtl-up-push', attr: { 'aria-label': 'Move to another day' } });
+  const push = row.createSpan({ cls: 'clickable-icon wtl-up-push', attr: { 'aria-label': 'Move to another day' } });
   setIcon(push, 'chevrons-right');
-  push.onclick = e => {
-    e.stopPropagation();
-    const menu = new Menu();
-    const today = moment().startOf('day');
-    const day = (label, d) => menu.addItem(i => i
-      .setTitle(`${label} · ${d.format('ddd MMM D')}`)
-      .onClick(() => plugin.setTaskDate(t, d.format('YYYY-MM-DD'))));
-    if (it.bucket !== 'today') day('Today', today.clone());
-    if (it.bucket !== 'tomorrow') day('Tomorrow', today.clone().add(1, 'day'));
-    day('In 3 days', today.clone().add(3, 'days'));
-    day('Next week', moment(data.weekStart).add(7, 'days'));
-    day('In 2 weeks', today.clone().add(14, 'days'));
-    day('In a month', today.clone().add(1, 'month'));
-    if (it.date) {
-      menu.addSeparator();
-      menu.addItem(i => i.setTitle('Remove date').onClick(() => plugin.setTaskDate(t, '')));
-    }
-    menu.showAtMouseEvent(e);
+  push.onclick = e => { e.stopPropagation(); moveMenu(plugin, it, data, e); };
+
+  if (open) taskDetails(list, plugin, it, data);
+}
+
+/** A task's details, under its line: dates, tags, time logged and booked, where it lives, and actions. */
+function taskDetails(list, plugin, it, data) {
+  const t = it.task;
+  const h = it.hours || {};
+  const box = list.createDiv({ cls: 'wtl-up-details' });
+  box.createDiv({ cls: 'wtl-up-details-title', text: t.desc });
+  const line = (label, value) => {
+    const r = box.createDiv({ cls: 'wtl-up-details-line' });
+    r.createSpan({ cls: 'wtl-up-details-label', text: label });
+    return r.createSpan({ text: value || '' });
   };
+  const fmt = d => moment(d).format('ddd MMM D');
+  const away = d => {
+    const n = moment(d).diff(moment(data.today), 'days');
+    return n === 0 ? 'today' : n === 1 ? 'tomorrow' : n === -1 ? 'yesterday' : n > 0 ? `in ${n} days` : `${-n} days ago`;
+  };
+  if (t.scheduled) line('Scheduled', `${fmt(t.scheduled)} (${away(t.scheduled)})`);
+  if (t.due) line('Due', `${fmt(t.due)} (${away(t.due)})`).addClass('wtl-up-details-due');
+  if (!t.scheduled && !t.due) line('Date', 'not scheduled');
+  if (t.tags.length) {
+    const tags = line('Tags');
+    for (const tg of t.tags) {
+      const c = tags.createSpan({ cls: 'wtl-up-details-tag', text: `#${tg}` });
+      const col = plugin.tagColor(tg);
+      if (col) c.style.borderColor = col;
+    }
+  }
+  const logged = h.logged ? `${fmtHours1(h.logged)}h${h.unreviewed ? ` (${fmtHours1(h.unreviewed)}h not reviewed yet)` : ''}` : 'none';
+  line('Logged', logged);
+  const booked = line('Booked', h.booked ? `${fmtHours1(h.booked)}h` : (it.unplanned ? 'nothing yet: needs a plan' : 'nothing'));
+  if (!h.booked && it.unplanned) booked.addClass('wtl-up-details-warn');
+  for (const b of h.ahead || []) {
+    box.createDiv({ cls: 'wtl-up-details-block', text: `${b.start.format('ddd MMM D, H:mm')} · ${b.title} · ${fmtSpan(b.hours)}` });
+  }
+  const where = line('In', '');
+  const link = where.createEl('a', { text: t.path.replace(/\.md$/, '') });
+  link.onclick = () => plugin.openTask(t);
+
+  const acts = box.createDiv({ cls: 'wtl-up-details-actions' });
+  const act = (label, fn, cls = '') => {
+    const b = acts.createEl('button', { cls, text: label });
+    b.onclick = e => { e.stopPropagation(); fn(e); };
+  };
+  act('Open note', () => plugin.openTask(t));
+  act('Plan…', () => new PlanModal(plugin, it).open(), it.unplanned ? 'mod-cta' : '');
+  act('Move…', e => moveMenu(plugin, it, data, e));
+  act('Done', () => plugin.completeTask(t));
+  if (it.unplanned) act('No plan needed', () => plugin.setNoPlanNeeded(t, true));
+  else if ((plugin.settings.noPlanNeeded || {})[t.key]) act('Needs a plan after all', () => plugin.setNoPlanNeeded(t, false));
 }
 
 /** Meetings in the next week with open actions from earlier meetings with the same people (Meeting Log). */
