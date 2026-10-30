@@ -39,7 +39,12 @@ A sidebar panel (calendar-clock ribbon icon, or *Open coming up*; it opens by it
 
 Tasks tagged with anything under *Leave out tags* (default `#papers_unread`), and tasks in your templates folder, aren't shown.
 
-**Scheduling happens in Full Calendar.** The calendar-plus icon on a task (or *Schedule…* in its details) opens Full Calendar. Drag the task from the all-day row into a time slot (Full Calendar writes the time onto the task, e.g. `10:00 - 11:30 Write intro ⏳ 2026-11-02`), or make a block for it like any other event. Either counts as booked:
+**Scheduling happens in Full Calendar.** Open it beside the panel (the calendar-plus icon on a task, or *Schedule…* in its details, opens it), then **drag a task from Coming up onto the calendar**:
+
+- onto a **time** in the week or day view: books a block for it (1 hour by default, under *Block length*) on your "Planned" calendar (or the one under *Book blocks on*), titled like the task. It works for any week the calendar is showing, so work due next week can be booked this week, and you can drop the same task again for more sessions. Stretch the block in Full Calendar to change its length. The first time, Full Calendar asks for *Write events* access.
+- onto a **day** (the all-day row, or month view): moves the task's ⏳ date there.
+
+A label by the cursor says which it will be. Booked time also counts if you make blocks yourself, or drag the task's own box from Full Calendar's all-day row into a time (Full Calendar then writes the time onto the task, e.g. `10:00 - 11:30 Write intro ⏳ 2026-11-02`):
 
 - a task with a time on its day is its own block;
 - any other upcoming block the log matches to the task counts too (the task's details list them).
