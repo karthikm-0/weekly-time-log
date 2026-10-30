@@ -39,11 +39,15 @@ A sidebar panel (calendar-clock ribbon icon, or *Open coming up*; it opens by it
 
 Tasks tagged with anything under *Leave out tags* (default `#papers_unread`), and tasks in your templates folder, aren't shown.
 
-**Booking time** happens in Full Calendar, the way you already make blocks. The calendar-plus icon on a task (or *Schedule…* in its details) opens it. A block counts for a task when:
+**Booking time: drag a task onto Full Calendar.** Open the calendar beside the panel (the calendar-plus icon on a task, or *Schedule…* in its details, opens it), go to any week, and drag a task from Coming up:
 
-- the log matches it by itself (its title shares words or tags with the task), or
-- you add it to the task: click the task, then search under *Add a block*. Any block from the last 8 weeks or coming up can be added, and *now: …* says if it's counted for another task (adding it moves it). Before you type, it lists your unlabelled blocks nearest to now;
-- or the task has a time on its line (Full Calendar writes one if you drag the task's own box into a time slot, e.g. `10:00 - 11:30 Write intro ⏳ 2026-11-02`).
+- onto **empty time**: books a block for it (1 hour by default, under *Block length*) on your "Planned" calendar (or the one under *Book blocks on*), titled like the task. Stretch it in Full Calendar to change its length; drop the task again for more sessions. The first time, Full Calendar asks for *Write events* access.
+- onto **a block you already have** (a "Deep work", or a past event): that block now counts for the task, and nothing new is made.
+- onto **a day** (the all-day row, or month view): moves the task's ⏳ date there.
+
+A label by the cursor says which it will be.
+
+If dragging isn't handy, **click the task** and search under *Add a block*: any block from the last 8 weeks or coming up can be added (*now: …* says if it's counted for another task; adding it moves it). Blocks also count by themselves when their title shares words or tags with the task, and so does a time on the task's own line (Full Calendar writes one if you drag the task's own box into a time slot, e.g. `10:00 - 11:30 Write intro ⏳ 2026-11-02`).
 
 **Needs a plan**: any task scheduled (⏳) or due (📅) in the next two weeks, or overdue, with nothing booked for it. These are listed first in red, counted in the status bar, and once a day a notice lists them. Big or small isn't asked up front. For small ones, the bell-off icon says *no plan needed* and the task stops being flagged (undo under Settings → *No plan needed*). Booking time also clears it. For fewer flags, Settings → *What needs a plan* → *Only 📅 deadlines* flags just deadlines, plus tasks you've already logged time on.
 

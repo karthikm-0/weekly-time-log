@@ -59,6 +59,8 @@ const DEFAULTS = {
   upcomingSkipTags: '#papers_unread', // tasks with these tags are left out
   upcomingOpened: false, // opened in the sidebar once on first run; after that, where you left it
   // Planning
+  blockHours: 1,           // length of a block made by dropping a task on the calendar
+  planCalendar: null,      // Full Calendar calendar id those blocks go on (default: one called "Planned")
   planRule: 'dated',       // what needs a plan: 'dated' (anything in the next 2 weeks) | 'due' (📅 deadlines)
   noPlanNeeded: {},        // task key -> day you said it doesn't need time booked
   lastPlanNag: null,       // ISO date of the last "needs a plan" notice
@@ -1339,6 +1341,26 @@ function taskBlock(t) {
   return { start, end, hours: (end - start) / 36e5 };
 }
 
+/**
+ * The spot on a Full Calendar view under (x, y): { date, time, event } for a time
+ * slot in the week or day grid ("HH:mm"; `event`: the title of the event under the
+ * cursor, if any), { date, time: null } for a day (the all-day row, month view), or
+ * null when it isn't over a calendar.
+ */
+function calendarSpotAt(x, y) {
+  const els = document.elementsFromPoint(x, y).filter(el => el.matches);
+  if (!els.some(el => el.closest('.fc'))) return null;
+  const col = els.find(el => el.matches('.fc-timegrid-col[data-date]'));
+  const lane = els.find(el => el.matches('.fc-timegrid-slot-lane[data-time]'));
+  if (col && lane) {
+    const ev = els.find(el => el.matches('.fc-event'));
+    const title = ev && (ev.querySelector('.fc-event-title') || ev);
+    return { date: col.dataset.date.slice(0, 10), time: lane.dataset.time.slice(0, 5), event: title ? title.textContent.trim() : null };
+  }
+  const day = els.find(el => el.matches('.fc-daygrid-day[data-date], .fc-timegrid-col[data-date]'));
+  return day ? { date: day.dataset.date.slice(0, 10), time: null } : null;
+}
+
 /** What a Coming up panel remembers between redraws. */
 function upcomingState() {
   return { folded: new Set(['undated']), day: null, more: false, open: new Set(), details: new Set() };
@@ -1485,6 +1507,15 @@ function upcomingRow(list, plugin, it, data, { section, state, redraw }) {
   const detailKey = `${section}|${t.key}`;
   const open = state.details.has(detailKey);
   const row = list.createDiv({ cls: 'wtl-up-row' + (open ? ' is-open' : '') });
+  // Drag it onto Full Calendar: a time books a block for it (or, onto a block you
+  // already have, uses that one); a day moves it there.
+  row.draggable = true;
+  row.ondragstart = e => {
+    e.dataTransfer.setData('text/plain', t.desc);
+    e.dataTransfer.effectAllowed = 'copyMove';
+    plugin.dragging = it;
+  };
+  row.ondragend = () => plugin.endDrag();
   const cb = row.createEl('input', { type: 'checkbox', cls: 'task-list-item-checkbox' });
   cb.onclick = e => { e.stopPropagation(); plugin.completeTask(t); };
   // The first tag with a colour, as a dot; the tags themselves are in the details.
@@ -1493,7 +1524,7 @@ function upcomingRow(list, plugin, it, data, { section, state, redraw }) {
   if (color) dot.style.background = color;
 
   const text = row.createSpan({ cls: 'wtl-up-text', text: t.desc });
-  text.setAttr('aria-label', `${t.desc}\nClick for details and its blocks`);
+  text.setAttr('aria-label', `${t.desc}\nDrag onto the calendar to book time · click for details`);
   text.onclick = () => {
     if (open) state.details.delete(detailKey); else state.details.add(detailKey);
     redraw();
@@ -1750,6 +1781,9 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     this.dueEl = this.addStatusBarItem();
     this.dueEl.addClass('wtl-status-due', 'is-hidden');
     this.dueEl.onclick = () => this.openUpcoming();
+    // Tasks dragged from Coming up onto Full Calendar.
+    this.registerDomEvent(document, 'dragover', e => this.onDragOver(e), true);
+    this.registerDomEvent(document, 'drop', e => this.onDrop(e), true);
     // New or replaced aTimeLogger exports in the vault folder: re-read and redraw.
     const onFile = file => {
       if (!file || !file.path || !/\.csv$/i.test(file.path)) return;
@@ -1882,6 +1916,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
   onunload() {
     if (this.probeHost) this.probeHost.remove();
+    if (this.dropHint) this.dropHint.remove();
   }
 
   // ---- Tracker -------------------------------------------------------------
@@ -2228,7 +2263,10 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         console.error('Weekly Time Log: coming up', e);
         return { error: e.message };
       });
-      this.upcomingPromise.then(data => this.updateDueStatus(data));
+      this.upcomingPromise.then(data => {
+        this.upcomingData = data;
+        this.updateDueStatus(data);
+      });
     }
     return this.upcomingPromise;
   }
@@ -2416,14 +2454,145 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
   // ---- Planning ----------------------------------------------------------------
 
-  /** Opens Full Calendar to make a block for a task. */
+  /** Opens Full Calendar, to drag the task onto it. */
   scheduleInCalendar(it) {
     if (!this.app.commands.executeCommandById(`${FC_ID}:full-calendar-open`)) {
       new Notice('Full Calendar Remastered is not enabled.');
       return;
     }
-    new Notice(`Make a block for "${it.task.desc}" in the calendar. If its title doesn't count it by itself, ` +
-      'click the task in Coming up and add the block there.', 8000);
+    new Notice(`Drag "${it.task.desc}" from Coming up onto a time in the calendar (any week) to book a block for it, ` +
+      'or onto a block you already have to use that one. Drop it on a day to move it there.', 8000);
+  }
+
+  // ---- Dragging tasks onto Full Calendar -------------------------------------
+
+  /** What dropping here would do, as a label by the cursor; and lets the drop happen. */
+  onDragOver(e) {
+    if (!this.dragging) return;
+    const spot = calendarSpotAt(e.clientX, e.clientY);
+    if (!spot) return this.hideDropHint();
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    const day = moment(spot.date).format('ddd MMM D');
+    const hours = Number(this.settings.blockHours) || 1;
+    const block = this.blockAt(spot);
+    const text = block
+      ? `Use "${block.title}" (${block.start.format('H:mm')}–${block.end.format('H:mm')}) for this`
+      : spot.time
+        ? `Book ${fmtSpan(hours)} · ${day}, ${moment(spot.time, 'HH:mm').format('H:mm')}`
+        : `Move to ${day}`;
+    if (!this.dropHint) this.dropHint = document.body.createDiv({ cls: 'wtl-drop-hint' });
+    this.dropHint.setText(text);
+    this.dropHint.style.left = `${e.clientX + 14}px`;
+    this.dropHint.style.top = `${e.clientY + 14}px`;
+    this.dropHint.removeClass('is-hidden');
+  }
+
+  /**
+   * The block a task was dropped onto: one of your blocks in that slot, the one whose
+   * title is under the cursor if there are several. Null over empty time.
+   */
+  blockAt(spot) {
+    if (!spot || !spot.time || !spot.event || !this.upcomingData) return null;
+    const from = moment(`${spot.date} ${spot.time}`, 'YYYY-MM-DD HH:mm').valueOf();
+    const to = from + 30 * 60 * 1000;
+    const hits = (this.upcomingData.blocks || []).filter(b => b.start.valueOf() < to && b.end.valueOf() > from);
+    return hits.find(b => b.title.trim() === spot.event) || hits.find(b => spot.event.includes(b.title.trim()))
+      || (hits.length === 1 ? hits[0] : null);
+  }
+
+  hideDropHint() {
+    if (this.dropHint) this.dropHint.addClass('is-hidden');
+  }
+
+  endDrag() {
+    this.dragging = null;
+    this.hideDropHint();
+  }
+
+  async onDrop(e) {
+    const it = this.dragging;
+    if (!it) return;
+    const spot = calendarSpotAt(e.clientX, e.clientY);
+    this.endDrag();
+    if (!spot) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const t = it.task;
+    if (!spot.time) {
+      await this.setTaskDate(t, spot.date);
+      new Notice(`Moved "${t.desc}" to ${moment(spot.date).format('ddd MMM D')}.`);
+      return;
+    }
+    // Dropped on a block you already have: that block is for this task, nothing new is made.
+    const block = this.blockAt(spot);
+    if (block) {
+      try {
+        await this.linkBlock(block, t);
+        new Notice(`"${block.title}" (${block.start.format('ddd MMM D, H:mm')}) now counts for "${t.desc}".`);
+      } catch (err) {
+        new Notice(`Weekly Time Log: ${err.message}`);
+      }
+      return;
+    }
+    const start = moment(`${spot.date} ${spot.time}`, 'YYYY-MM-DD HH:mm');
+    const end = start.clone().add((Number(this.settings.blockHours) || 1) * 60, 'minutes');
+    try {
+      const cal = await this.planCalendar();
+      if (await this.createBlock(cal.id, t.desc, start, end)) {
+        new Notice(`Booked ${start.format('ddd MMM D, H:mm')}–${end.format('H:mm')} for "${t.desc}" on ${cal.name}. ` +
+          'Stretch it in the calendar to change its length.');
+        this.refreshViews();
+      }
+    } catch (err) {
+      new Notice(`Weekly Time Log: ${err.message}`);
+    }
+  }
+
+  /** The calendar dropped blocks go on: the one picked in settings, else one called "Planned", else the first that takes new events. */
+  async planCalendar() {
+    const api = await this.calendarApi();
+    const canCreate = id => {
+      try {
+        const c = api.getProviderCapabilities(id);
+        return !!(c && c.canCreate);
+      } catch (e) {
+        return false;
+      }
+    };
+    const cals = (api.getCalendarSources() || []).filter(src => src.type !== 'tasks' && canCreate(src.id));
+    const cal = cals.find(c => c.id === this.settings.planCalendar) || cals.find(c => /plan/i.test(c.name || '')) || cals[0];
+    if (!cal) throw new Error('none of your Full Calendar calendars can take new events.');
+    return { id: cal.id, name: cal.name || cal.id };
+  }
+
+  /** Makes a calendar event titled like the task, so the log matches it to the task. Asks for "Write events" access the first time. */
+  async createBlock(calendarId, title, start, end) {
+    const event = {
+      type: 'single', title, allDay: false, date: start.format('YYYY-MM-DD'), endDate: null,
+      startTime: start.format('HH:mm'), endTime: end.format('HH:mm'),
+    };
+    const api = await this.calendarApi();
+    try {
+      return await api.createEvent(calendarId, event);
+    } catch (e) {
+      if (!/missing required scope/i.test(e.message)) throw e;
+      return (await this.requestWriteAccess()).createEvent(calendarId, event);
+    }
+  }
+
+  async requestWriteAccess() {
+    const fc = this.fullCalendar();
+    const token = await fc.api.requestAccess(
+      this.manifest.id,
+      'Read your calendar blocks to build a weekly time log matched to Tasks, and add a block when you drag a task ' +
+        'from Coming up onto the calendar. Settings access is optional.',
+      ['events:read', 'providers:read', 'settings:read', 'events:write'],
+    );
+    if (!token) throw new Error('Calendar access was not granted, so nothing was booked.');
+    this.settings.token = token;
+    await this.saveSettings();
+    return fc.api.withToken(token);
   }
 
   /** Labels one of your calendar blocks with a task, as confirming it in the log would. */
@@ -2433,6 +2602,126 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     await this.annotate(report, block, { kind: 'task', task });
     this.refreshViews();
   }
+
+  /** Changes a task's line in its note with `edit(line) -> line`, if it can still be found. */
+  async editTask(task, edit, what) {
+    const file = this.app.vault.getAbstractFileByPath(task.path);
+    if (!(file instanceof TFile)) return;
+    let found = false;
+    await this.app.vault.process(file, data => {
+      const lines = data.split('\n');
+      const i = lineOf(lines, task);
+      if (i < 0) return data;
+      found = true;
+      lines[i] = edit(lines[i]);
+      return lines.join('\n');
+    });
+    if (!found) new Notice(`That task has changed since it was listed; open its note to ${what} it.`);
+  }
+
+  /** Ticks a task off, through the Tasks plugin when it's there (done date, recurrence). */
+  completeTask(task) {
+    const tasks = this.app.plugins.enabledPlugins.has(TASKS_ID) && this.app.plugins.plugins[TASKS_ID];
+    const api = tasks && tasks.apiV1;
+    return this.editTask(task, line => (api && api.executeToggleTaskDoneCommand
+      ? api.executeToggleTaskDoneCommand(line, task.path).replace(/\n$/, '') // a recurring task adds its next line
+      :`${line.replace(/\[.\]/, '[x]').replace(/\s*$/, '')} ✅ ${moment().format('YYYY-MM-DD')}`), 'tick');
+  }
+
+  /** Moves a task to `iso` ('' removes its date). */
+  setTaskDate(task, iso) {
+    return this.editTask(task, line => withDate(line, iso), 'move');
+  }
+
+  // ---- Full Calendar access ----------------------------------------------
+
+  fullCalendar() {
+    const fc = this.app.plugins.plugins[FC_ID];
+    if (!fc) throw new Error('Full Calendar Remastered is not enabled.');
+    if (!fc.api || typeof fc.api.withToken !== 'function') {
+      throw new Error('This version of Full Calendar Remastered has no plugin API.');
+    }
+    return fc;
+  }
+
+  // events:read and providers:read are required; settings:read (for the calendar's
+  // first day of week) is optional and may be unticked in Full Calendar's dialog.
+  calendarApi() {
+    if (!this.apiPromise) {
+      this.apiPromise = this.authorize().finally(() => { this.apiPromise = null; });
+    }
+    return this.apiPromise;
+  }
+
+  async authorize() {
+    const fc = this.fullCalendar();
+    const usable = api => {
+      try {
+        api.getCalendarSources();
+        return true;
+      } catch (e) {
+        return false; // token from an older version, missing providers:read
+      }
+    };
+    let api = this.settings.token ? fc.api.withToken(this.settings.token) : null;
+    if (!api || !usable(api)) {
+      if (this.silent) throw new Error('calendar access needs to be granted first');
+      const token = await fc.api.requestAccess(
+        this.manifest.id,
+        'Read your calendar blocks and calendar list to build a weekly time log matched to Tasks. ' +
+          'Settings access is optional (only used for the first day of the week).',
+        ['events:read', 'providers:read', 'settings:read'],
+      );
+      if (!token) throw new Error('Calendar access was not granted.');
+      this.settings.token = token;
+      await this.saveSettings();
+      api = fc.api.withToken(token);
+      if (!api || !usable(api)) {
+        throw new Error('Weekly Time Log needs "Read events" and "Read providers" access in Full Calendar.');
+      }
+    }
+    return api;
+  }
+
+  async calendarSources() {
+    const api = await this.calendarApi();
+    const sources = api.getCalendarSources() || [];
+    let firstDay = 0;
+    try {
+      firstDay = api.getSettings().firstDay ?? 0;
+    } catch (e) {
+      // settings:read not granted; fall back to Sunday
+    }
+    return { sources, firstDay };
+  }
+
+  /** 0 = Sunday, 1 = Monday; "Same as calendar" reads Full Calendar's setting. */
+  async firstDay() {
+    let first = this.settings.weekStart;
+    if (first === 'calendar') first = (await this.calendarSources()).firstDay;
+    return Number(first) || 0;
+  }
+
+  /**
+   * Start of week number `week` in `year`. Monday weeks use ISO numbering;
+   * other starts use "week 1 contains Jan 1" (US-style, e.g. Sunday weeks).
+   */
+  async weekNumberStart(year, week) {
+    const first = await this.firstDay();
+    if (first === 1) return moment(`${year}-W${String(week).padStart(2, '0')}-1`, 'GGGG-[W]WW-E');
+    const jan1 = moment(`${year}-01-01`, 'YYYY-MM-DD');
+    return jan1.subtract((jan1.day() - first + 7) % 7, 'days').add((week - 1) * 7, 'days');
+  }
+
+  /** The week containing `anchor` (default today), shifted by `offset` weeks. */
+  async weekBounds(offset = 0, anchor = null) {
+    const first = await this.firstDay();
+    const day = (anchor ? moment(anchor) : moment()).startOf('day');
+    const start = day.clone().subtract((day.day() - first + 7) % 7, 'days').add(offset * 7, 'days');
+    return { start, end: start.clone().add(7, 'days') };
+  }
+
+  // ---- Data collection ----------------------------------------------------
 
   async collectBlocks(start, end) {
     const api = await this.calendarApi();
@@ -4422,6 +4711,23 @@ class TimeLogSettings extends PluginSettingTab {
         s.upcomingSkipTags = v;
         await changed();
       }));
+    new Setting(containerEl)
+      .setName('Block length')
+      .setDesc('Hours booked when you drop a task on a time in Full Calendar (stretch it there afterwards).')
+      .addDropdown(d => d
+        .addOptions({ 0.5: '30 minutes', 1: '1 hour', 1.5: '1.5 hours', 2: '2 hours', 3: '3 hours' })
+        .setValue(String(s.blockHours || 1))
+        .onChange(async v => { s.blockHours = Number(v); await this.plugin.saveSettings(); }));
+    if (sources.length) {
+      new Setting(containerEl)
+        .setName('Book blocks on')
+        .setDesc('The calendar a block goes on when you drop a task on a time.')
+        .addDropdown(d => {
+          d.addOption('', 'A calendar called "Planned", if there is one');
+          for (const src of sources.filter(x => x.type !== 'tasks')) d.addOption(src.id, src.name || src.id);
+          d.setValue(s.planCalendar || '').onChange(async v => { s.planCalendar = v || null; await this.plugin.saveSettings(); });
+        });
+    }
     new Setting(containerEl)
       .setName('What needs a plan')
       .setDesc('Tasks like this with nothing booked are flagged until you book time or say "no plan needed".')

@@ -501,3 +501,19 @@ body.theme-dark {
 .wtl-up-add-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wtl-up-add-other { flex: none; max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-style: italic; }
 .wtl-up-add-row button { flex: none; font-size: var(--font-ui-smaller); padding: 1px 8px; height: auto; }
+
+/* Dragging a task onto Full Calendar */
+.wtl-up-row[draggable="true"] { cursor: grab; }
+.wtl-up-row .wtl-up-text { cursor: pointer; }
+.wtl-drop-hint {
+  position: fixed;
+  z-index: var(--layer-tooltip);
+  pointer-events: none;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: var(--font-ui-small);
+  box-shadow: var(--shadow-s);
+}
+.wtl-drop-hint.is-hidden { display: none; }
