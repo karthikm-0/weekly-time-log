@@ -18,7 +18,7 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 
   ````
   ```time-log
-  show: hours        # full (default) | chart | hours | days | timeline | agenda
+  show: hours        # full (default) | chart | hours | days | timeline | agenda | upcoming | tracker
   from: today        # agenda only: hide days before today
   group: Role        # what daily charts and the summary line split by (default: area); none = plain
   detail: Role       # grouping for the folded breakdown in show: full (default: the full log's choice)
@@ -26,6 +26,22 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
   week: last         # this | last | 2026-09-28 | 2026-W40 (default: from the note's filename)
   ```
   ````
+
+## Coming up and planning
+
+A sidebar panel (calendar-clock ribbon icon, or *Open coming up*; it opens by itself the first time) so what's ahead stays in view:
+
+- **Grid** of the next weeks (*Weeks ahead*, default 6), each day shaded by how many tasks are planned for it. Hover a day to see them; click it to list only that day.
+- **One line per task**, in sections: Needs a plan, Late, Today, Tomorrow, This week, Before meetings, Next week, Later, Not scheduled (folded). A task's day is its ⏳ scheduled date, else its 📅 due date. Tags show as a coloured dot, and everything else is in the tooltip. Tick the box to finish a task (through Tasks, so recurring tasks recur), click the text to open it, or use ⏩ to move it to another day.
+- **Hours** next to each task: `2h` logged (calendar blocks matched to it in the last 8 weeks, suggestions included) and `+1h` booked (blocks still ahead, up to its day).
+- **Before meetings**: calendar events in the next week, with the open actions from earlier meetings with the same people (from Meeting Log, if it's enabled).
+- **Status bar**: `2 to plan · 1 late · 3 today`; click it to open the panel. `show: upcoming` puts the same panel in a note.
+
+Tasks tagged with anything under *Leave out tags* (default `#papers_unread`), and tasks in your templates folder, aren't shown.
+
+**Plan** (calendar-plus icon on a task) books time for it on your calendar. Pick how much time and the longest block you want. Free time in your working hours, before the task's due date (else its scheduled day, else within a week), is suggested one block a day first, so the work is spread out. Untick any suggestion, or add other free times by hand, then *Book*. Blocks are titled like the task, so the log matches them to it and they show as booked. The first time, Full Calendar asks for *Write events* access.
+
+**Needs a plan**: any task scheduled (⏳) or due (📅) in the next two weeks, or overdue, with nothing booked for it. These are listed first in red, counted in the status bar, and once a day a notice lists them. Big or small isn't asked up front. For small ones, the bell-off icon says *no plan needed* and the task stops being flagged (undo under Settings → *No plan needed*). Booking time also clears it. For fewer flags, Settings → *What needs a plan* → *Only 📅 deadlines* flags just deadlines, plus tasks you've already logged time on.
 
 ## Automatic
 
