@@ -484,3 +484,9 @@ body.theme-dark {
 .wtl-plan-other summary { cursor: pointer; color: var(--text-muted); font-size: var(--font-ui-small); margin-bottom: 6px; }
 .wtl-plan-other .wtl-plan-field { margin-bottom: 4px; }
 .wtl-plan-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--background-modifier-border); padding-top: 10px; }
+.wtl-plan-own { display: flex; flex-direction: column; gap: 2px; }
+.wtl-plan-own > .wtl-plan-label { width: auto; margin-bottom: 2px; }
+.wtl-plan-ownrow { grid-template-columns: 7.5em 7em 1fr auto auto; cursor: default; }
+.wtl-plan-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wtl-plan-ownrow.is-used { color: var(--text-muted); }
+.wtl-plan-done { color: var(--text-success); font-size: var(--font-ui-small); }

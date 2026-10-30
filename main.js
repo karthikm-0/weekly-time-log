@@ -1259,8 +1259,9 @@ function bucketOf(date, today, weekStart) {
 /**
  * Hours per task key from blocks matched to tasks: `logged` (already happened;
  * `unreviewed` is the part that's only suggested) and `booked` (still ahead, up to
- * the end of the task's day, or any time ahead for late and undated tasks). A block
- * with several tasks splits its hours between them, as in the Task view.
+ * the end of the task's day, or any time ahead for late and undated tasks; `ahead`
+ * lists those blocks). A block with several tasks splits its hours between them, as
+ * in the Task view.
  */
 function taskHours(blocks, dateOf, today, now) {
   const out = new Map();
@@ -1268,14 +1269,17 @@ function taskHours(blocks, dateOf, today, now) {
     if (!b.tasks || !b.tasks.length || !b.hours) continue;
     const share = b.hours / b.tasks.length;
     for (const t of b.tasks) {
-      if (!out.has(t.key)) out.set(t.key, { logged: 0, unreviewed: 0, booked: 0 });
+      if (!out.has(t.key)) out.set(t.key, { logged: 0, unreviewed: 0, booked: 0, ahead: [] });
       const h = out.get(t.key);
       if (b.end.valueOf() <= now) {
         h.logged += share;
         if (b.status !== 'confirmed') h.unreviewed += share;
       } else {
         const d = dateOf(t.key);
-        if (!d || d < today || b.date <= d) h.booked += share;
+        if (!d || d < today || b.date <= d) {
+          h.booked += share;
+          h.ahead.push({ title: b.title, start: b.start, hours: share });
+        }
       }
     }
   }
@@ -1516,7 +1520,12 @@ function upcomingRow(list, plugin, it, data, { quiet = false } = {}) {
   if (t.scheduled) tip.push(`Scheduled ${moment(t.scheduled).format('ddd MMM D')}`);
   if (t.due) tip.push(`Due ${moment(t.due).format('ddd MMM D')}`);
   if (h && h.logged) tip.push(`${fmtHours1(h.logged)} h logged${h.unreviewed ? ` (${fmtHours1(h.unreviewed)} h not reviewed yet)` : ''}`);
-  if (h && h.booked) tip.push(`${fmtHours1(h.booked)} h booked on your calendar${it.date && it.bucket !== 'late' ? ' by then' : ''}`);
+  if (h && h.booked) {
+    tip.push(`${fmtHours1(h.booked)} h booked on your calendar${it.date && it.bucket !== 'late' ? ' by then' : ''}:`);
+    const ahead = h.ahead || [];
+    for (const b of ahead.slice(0, 3)) tip.push(`  ${b.start.format('ddd MMM D H:mm')} ${b.title} (${fmtSpan(b.hours)})`);
+    if (ahead.length > 3) tip.push(`  and ${ahead.length - 3} more`);
+  }
   tip.push(t.path.replace(/\.md$/, ''));
   text.setAttr('aria-label', tip.join('\n'));
 
@@ -1647,10 +1656,13 @@ function fmtSpan(h) {
   return h < 1 ? `${Math.round(h * 60)}m` : `${fmtHours1(h)}h`;
 }
 
+const OWN_SHOWN = 5; // "Your blocks" lists this many, then "N more"
+
 /**
  * Book calendar time for a task: how much, in blocks of up to how long, before
- * when. Free times in your working hours are suggested (spread over the days);
- * untick any, or pick other free times, then book them in Full Calendar.
+ * when. Blocks you already made can be used for it (linked, not duplicated); free
+ * times in your working hours are suggested for the rest (spread over the days).
+ * Untick any, or pick other free times, then book them in Full Calendar.
  */
 class PlanModal extends Modal {
   constructor(plugin, item) {
@@ -1667,6 +1679,7 @@ class PlanModal extends Modal {
     this.skip = new Set();
     this.extra = [];
     this.proposed = null;
+    this.linked = []; // your blocks used for this task while the dialog is open
   }
 
   async onOpen() {
@@ -1677,6 +1690,7 @@ class PlanModal extends Modal {
       this.hours = parseHours(this.plugin.settings.planHours) || parseHours(DEFAULTS.planHours);
       this.calendars = await this.plugin.writableCalendars();
       await this.loadBusy();
+      this.ahead = (await this.plugin.upcoming()).ahead || [];
     } catch (e) {
       this.contentEl.empty();
       this.contentEl.createDiv({ cls: 'wtl-error', text: e.message });
@@ -1711,8 +1725,21 @@ class PlanModal extends Modal {
     this.render();
   }
 
+  /**
+   * Your upcoming blocks by the chosen day that could be for this task: not already
+   * counted for it, and not confirmed for something else in the log.
+   */
+  ownBlocks() {
+    const key = this.item.task.key;
+    const now = Date.now();
+    return this.ahead.filter(b => b.start.valueOf() > now && b.date <= this.until && b.status !== 'confirmed'
+      && !(b.tasks || []).some(x => x.key === key) && !this.linked.includes(b));
+  }
+
   render() {
-    if (!this.proposed) this.proposed = proposeBlocks(this.free(this.extra), this.need, this.size);
+    const hoursOf = bs => bs.reduce((a, b) => a + (b.end - b.start) / 36e5, 0);
+    const linkedHours = hoursOf(this.linked);
+    if (!this.proposed) this.proposed = proposeBlocks(this.free(this.extra), Math.max(0, this.need - linkedHours), this.size);
     const el = this.contentEl;
     el.empty();
     const t = this.item.task;
@@ -1721,8 +1748,22 @@ class PlanModal extends Modal {
     if (t.due) facts.push(`Due ${moment(t.due).format('ddd MMM D')}`);
     else if (t.scheduled) facts.push(`Scheduled ${moment(t.scheduled).format('ddd MMM D')}`);
     if (h.logged) facts.push(`${fmtHours1(h.logged)}h logged`);
-    if (h.booked) facts.push(`${fmtHours1(h.booked)}h already booked`);
+    if (h.booked || linkedHours) facts.push(`${fmtHours1((h.booked || 0) + linkedHours)}h already booked`);
     if (facts.length) el.createDiv({ cls: 'wtl-plan-facts', text: facts.join(' · ') });
+
+    // Blocks you made yourself: use one for this task instead of booking another.
+    const own = this.ownBlocks();
+    if (own.length || this.linked.length) {
+      const sec = el.createDiv({ cls: 'wtl-plan-own' });
+      sec.createDiv({ cls: 'wtl-plan-label', text: 'Your blocks by then: use one for this' });
+      for (const b of this.linked) this.ownRow(sec, b, true);
+      const shown = this.ownMore ? own : own.slice(0, OWN_SHOWN);
+      for (const b of shown) this.ownRow(sec, b, false);
+      if (shown.length < own.length) {
+        const more = sec.createDiv({ cls: 'wtl-up-more', text: `${own.length - shown.length} more` });
+        more.onclick = () => { this.ownMore = true; this.render(); };
+      }
+    }
 
     const field = label => {
       const row = el.createDiv({ cls: 'wtl-plan-field' });
@@ -1756,8 +1797,7 @@ class PlanModal extends Modal {
       this.extra.splice(i, 1);
       this.render();
     }));
-    const hoursOf = bs => bs.reduce((a, b) => a + (b.end - b.start) / 36e5, 0);
-    const found = hoursOf(this.proposed) + hoursOf(this.extra);
+    const found = linkedHours + hoursOf(this.proposed) + hoursOf(this.extra);
     if (found + 1e-6 < this.need) {
       list.createDiv({
         cls: 'wtl-plan-warn',
@@ -1805,6 +1845,10 @@ class PlanModal extends Modal {
       foot.createSpan({ cls: 'wtl-muted', text: `On ${this.calendars[0].name}` });
     }
     const picked = this.chosen();
+    if (!picked.length && this.linked.length) {
+      foot.createEl('button', { cls: 'mod-cta', text: 'Done' }).onclick = () => this.close();
+      return;
+    }
     const go = foot.createEl('button', {
       cls: 'mod-cta',
       text: picked.length ? `Book ${plural(picked.length, 'block')} · ${fmtSpan(hoursOf(picked))}` : 'Book',
@@ -1814,6 +1858,32 @@ class PlanModal extends Modal {
       go.disabled = true;
       go.setText('Booking…');
       await this.book(picked);
+    };
+  }
+
+  /** One of your blocks: "Use" links it to this task (in the log), so it counts as booked for it. */
+  ownRow(sec, b, used) {
+    const row = sec.createDiv({ cls: 'wtl-plan-block wtl-plan-ownrow' + (used ? ' is-used' : '') });
+    row.createSpan({ cls: 'wtl-plan-day', text: b.start.format('ddd MMM D') });
+    row.createSpan({ cls: 'wtl-plan-time', text: `${b.start.format('H:mm')}–${b.end.format('H:mm')}` });
+    const name = row.createSpan({ cls: 'wtl-plan-title', text: b.title });
+    if (b.status === 'suggested' && b.tasks && b.tasks.length) name.setAttr('aria-label', `Suggested for: ${b.tasks.map(x => x.desc).join(', ')}`);
+    row.createSpan({ cls: 'wtl-plan-len', text: fmtSpan(b.hours) });
+    if (used) {
+      row.createSpan({ cls: 'wtl-plan-done', text: '✓ Used' });
+      return;
+    }
+    const use = row.createEl('button', { cls: 'wtl-plan-chip', text: 'Use' });
+    use.onclick = async () => {
+      use.disabled = true;
+      try {
+        await this.plugin.linkBlock(b, this.item.task);
+        this.linked.push(b);
+        this.reset();
+      } catch (e) {
+        new Notice(`Weekly Time Log: ${e.message}`);
+        use.disabled = false;
+      }
     };
   }
 
@@ -2443,6 +2513,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       weekStart: ws,
       horizon: horizon.format('YYYY-MM-DD'),
       items,
+      ahead: blocks.filter(b => b.end.valueOf() > now), // for Plan: your own blocks to use for a task
       meetings: await this.meetingActions(blocks, now),
       calendarError,
     };
@@ -2578,6 +2649,14 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       if (ok) made++;
     }
     return made;
+  }
+
+  /** Labels one of your calendar blocks with a task, as confirming it in the log would. */
+  async linkBlock(block, task) {
+    const day = block.start.clone().startOf('day');
+    const report = { start: day, end: day.clone().add(1, 'day'), blocks: [block], tasks: [task], tagCounts: this.collectVaultTags() };
+    await this.annotate(report, block, { kind: 'task', task });
+    this.refreshViews();
   }
 
   async requestWriteAccess() {
