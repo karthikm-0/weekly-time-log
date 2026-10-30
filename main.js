@@ -63,6 +63,7 @@ const DEFAULTS = {
   planCalendar: null,      // Full Calendar calendar id those blocks go on (default: one called "Planned")
   planRule: 'dated',       // what needs a plan: 'dated' (anything in the next 2 weeks) | 'due' (📅 deadlines)
   noPlanNeeded: {},        // task key -> day you said it doesn't need time booked
+  estimates: {},           // task key -> hours you think it needs in all
   notFor: {},              // blockKey -> task keys you said the block isn't for (never guessed again)
   lastPlanNag: null,       // ISO date of the last "needs a plan" notice
   // blockKey -> { kind: 'task'|'tag'|'mix'|'none', task, taskDesc, taskPath, tasks, extraTags, tags, title, date }
@@ -1244,11 +1245,29 @@ const PLAN_DAYS = 14;  // deadlines this close need time booked
 function needsPlan(it, today, quiet, rule = 'dated') {
   const t = it.task;
   const h = it.hours || {};
-  if (quiet[t.key] || h.booked) return false;
+  if (quiet[t.key]) return false;
   const soon = moment(today).add(PLAN_DAYS, 'days').format('YYYY-MM-DD');
+  // With an estimate: time done and booked before its deadline doesn't cover it.
+  if (it.estimate) return !!it.short && ((!!t.due && t.due <= soon) || (!!it.date && it.date <= soon));
+  if (h.booked) return false;
   if (t.due && t.due <= soon) return true;
   if (!it.date || it.date > soon) return false;
   return rule !== 'due' || !!h.logged;
+}
+
+/** The day work on a task has to be done by: 📅 due, else ⏳ scheduled. */
+function deadlineOf(t) {
+  return t.due || t.scheduled || null;
+}
+
+/** Hours from what you type: "6", "1.5", "6h", "90m", "1h30". Null if it isn't a length. */
+function parseHours(text) {
+  const s = String(text || '').trim().toLowerCase().replace(',', '.');
+  if (!s) return null;
+  let m = s.match(/^(\d+(?:\.\d+)?)\s*(?:h(?:\s*(\d+)\s*m?)?)?$/);
+  if (m) return Number(m[1]) + (m[2] ? Number(m[2]) / 60 : 0) || null;
+  m = s.match(/^(\d+)\s*m(?:in)?$/);
+  return m ? Number(m[1]) / 60 || null : null;
 }
 
 /** The day a task is planned for: ⏳ scheduled, else 📅 due. */
@@ -1270,9 +1289,10 @@ function bucketOf(date, today, weekStart) {
 /**
  * Hours per task key from blocks matched to tasks: `logged` (already happened;
  * `unreviewed` is the part that's only suggested) and `booked` (still ahead, up to
- * the end of the task's day, or any time ahead for late and undated tasks). `past`
- * and `ahead` list the blocks behind each, so the numbers can be traced. A block
- * with several tasks splits its hours between them, as in the Task view.
+ * the end of the task's deadline day, or any time ahead for late and undated tasks).
+ * `past` and `ahead` list the blocks behind each, so the numbers can be traced;
+ * `after` the ones booked past the deadline, which don't count. A block with several
+ * tasks splits its hours between them, as in the Task view.
  */
 function taskHours(blocks, dateOf, today, now) {
   const out = new Map();
@@ -1280,7 +1300,7 @@ function taskHours(blocks, dateOf, today, now) {
     if (!b.tasks || !b.tasks.length || !b.hours) continue;
     const share = b.hours / b.tasks.length;
     for (const t of b.tasks) {
-      if (!out.has(t.key)) out.set(t.key, { logged: 0, unreviewed: 0, booked: 0, past: [], ahead: [] });
+      if (!out.has(t.key)) out.set(t.key, { logged: 0, unreviewed: 0, booked: 0, past: [], ahead: [], after: [] });
       const h = out.get(t.key);
       const entry = { key: b.key, title: b.title, start: b.start, hours: share, confirmed: b.status === 'confirmed' };
       if (b.end.valueOf() <= now) {
@@ -1292,6 +1312,8 @@ function taskHours(blocks, dateOf, today, now) {
         if (!d || d < today || b.date <= d) {
           h.booked += share;
           h.ahead.push(entry);
+        } else {
+          h.after.push(entry);
         }
       }
     }
@@ -1541,7 +1563,16 @@ function upcomingRow(list, plugin, it, data, { section, state, redraw }) {
     plugin.editTaskInModal(t);
   };
 
-  if (h && (h.logged || h.booked)) {
+  if (it.estimate) {
+    // Done and booked before the deadline, against what it needs: "3/6h", and "short 1h" in red.
+    const done = (h && h.logged) || 0;
+    const booked = (h && h.booked) || 0;
+    const by = it.deadline ? ` by ${moment(it.deadline).format('ddd MMM D')}` : '';
+    const hrs = row.createSpan({ cls: 'wtl-up-hours' });
+    hrs.createSpan({ text: `${fmtHours1(done + booked)}/${fmtHours1(it.estimate)}h` }).setAttr('aria-label',
+      `Needs ${fmtHours1(it.estimate)}h: ${fmtHours1(done)}h done + ${fmtHours1(booked)}h booked${by}.\nClick the task to see the blocks.`);
+    if (it.short) hrs.createSpan({ cls: 'wtl-up-short', text: `short ${fmtHours1(it.short)}h` });
+  } else if (h && (h.logged || h.booked)) {
     const hrs = row.createSpan({ cls: 'wtl-up-hours' });
     const n = bs => plural((bs || []).length, 'calendar block');
     if (h.logged) {
@@ -1563,7 +1594,8 @@ function upcomingRow(list, plugin, it, data, { section, state, redraw }) {
   setIcon(plan, 'calendar-plus');
   if (it.unplanned) {
     plan.addClass('is-unplanned');
-    plan.setAttr('aria-label', 'Nothing booked for this yet: schedule it in Full Calendar');
+    plan.setAttr('aria-label', it.short ? `Short ${fmtHours1(it.short)}h before it's due: book more in Full Calendar`
+      : 'Nothing booked for this yet: schedule it in Full Calendar');
   }
   plan.onclick = e => { e.stopPropagation(); plugin.scheduleInCalendar(it); };
   if (section === 'plan') {
@@ -1637,11 +1669,44 @@ function taskDetails(list, plugin, it, data, state) {
       `${h.unreviewed ? ` (${fmtHours1(h.unreviewed)}h guessed)` : ''}`
     : `none in the last ${plural(weeks, 'week')}`);
   blockList(h.past || [], true);
+  const by = it.deadline && it.deadline >= data.today ? ` before ${fmt(it.deadline)}` : '';
   const booked = line('Booked', h.booked
-    ? `${fmtHours1(h.booked)}h from ${plural((h.ahead || []).length, 'block')} coming up`
-    : (it.unplanned ? 'nothing yet: needs a plan' : 'nothing'));
+    ? `${fmtHours1(h.booked)}h from ${plural((h.ahead || []).length, 'block')} coming up${by}`
+    : (it.unplanned && !it.estimate ? 'nothing yet: needs a plan' : 'nothing'));
   if (!h.booked && it.unplanned) booked.addClass('wtl-up-details-warn');
   blockList(h.ahead || [], false);
+  if ((h.after || []).length) {
+    const late = h.after.reduce((n, b) => n + b.hours, 0);
+    line('After due', `${fmtHours1(late)}h booked after ${fmt(it.deadline)}: doesn't count`).addClass('wtl-up-details-warn');
+    blockList(h.after, false);
+  }
+
+  // What it needs in all; with it, "needs a plan" means "not enough booked before the deadline".
+  const need = line('Needs', '');
+  const est = need.createEl('input', { type: 'text', cls: 'wtl-up-estimate', attr: { placeholder: 'e.g. 6h', 'aria-label': 'Hours it needs in all: 6, 1.5, 90m' } });
+  est.value = it.estimate ? `${fmtHours1(it.estimate)}h` : '';
+  est.addEventListener('click', e => e.stopPropagation());
+  const sum = need.createSpan({ cls: 'wtl-up-estimate-sum' });
+  if (it.estimate) {
+    sum.setText(it.short
+      ? ` · ${fmtHours1((h.logged || 0) + (h.booked || 0))}h done and booked: short ${fmtHours1(it.short)}h`
+      : ' · covered by what\'s done and booked');
+    sum.toggleClass('wtl-up-details-warn', !!it.short);
+  } else {
+    sum.setText(' · how long it takes in all, to check you\'ve booked enough');
+    sum.addClass('wtl-muted');
+  }
+  const saveEst = () => {
+    const v = est.value.trim();
+    const hours = parseHours(v);
+    if (v && !hours) {
+      new Notice('Type a length like 6, 1.5, 6h or 90m.');
+      return;
+    }
+    if ((hours || null) !== (it.estimate || null)) plugin.setEstimate(t, hours);
+  };
+  est.addEventListener('keydown', e => { if (e.key === 'Enter') est.blur(); });
+  est.addEventListener('change', saveEst);
   const where = line('In', '');
   const link = where.createEl('a', { text: t.path.replace(/\.md$/, '') });
   link.onclick = () => plugin.openTask(t);
@@ -2357,13 +2422,14 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     ].filter(Boolean).map(d => `${normalizePath(d)}/`);
     const open = tasks.filter(t => !t.done && !skipped(t) && !templateDirs.some(d => t.path.startsWith(d)));
 
-    const dates = new Map(open.map(t => [t.key, taskDate(t)]));
+    // Booked time counts up to the deadline (📅, else ⏳), not just to the ⏳ day.
+    const dates = new Map(open.map(t => [t.key, deadlineOf(t)]));
     const hours = taskHours(blocks, k => dates.get(k), today, now);
     // A task you gave a time in Full Calendar (dragged into a slot) is a block of its own.
     for (const t of open) {
       const b = taskBlock(t);
       if (!b || b.end.valueOf() <= now) continue;
-      if (!hours.has(t.key)) hours.set(t.key, { logged: 0, unreviewed: 0, booked: 0, past: [], ahead: [] });
+      if (!hours.has(t.key)) hours.set(t.key, { logged: 0, unreviewed: 0, booked: 0, past: [], ahead: [], after: [] });
       const h = hours.get(t.key);
       h.booked += b.hours;
       h.ahead.unshift({ title: 'this task, at the time you gave it', start: b.start, hours: b.hours, confirmed: true });
@@ -2375,6 +2441,13 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const items = open.map(t => {
       const date = taskDate(t);
       const it = { task: t, date, bucket: bucketOf(date, today, ws), hours: hours.get(t.key) || null };
+      it.deadline = deadlineOf(t);
+      it.estimate = Number((s.estimates || {})[t.key]) || null;
+      if (it.estimate) {
+        const h = it.hours || {};
+        const short = it.estimate - (h.logged || 0) - (h.booked || 0);
+        it.short = short >= 0.25 ? short : 0; // under 15 minutes is close enough
+      }
       it.unplanned = knowBooked && needsPlan(it, today, quiet, s.planRule);
       return it;
     }).sort((a, b) => (a.date || '~').localeCompare(b.date || '~')
@@ -2458,13 +2531,23 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     if (!unplanned.length || s.lastPlanNag === today) return;
     s.lastPlanNag = today;
     this.saveSettings();
-    const names = unplanned.slice(0, 3).map(i => `• ${i.task.desc}`).join('\n') + (unplanned.length > 3 ? `\n• and ${unplanned.length - 3} more` : '');
+    const names = unplanned.slice(0, 3).map(i => `• ${i.task.desc}${i.short ? ` (short ${fmtHours1(i.short)}h)` : ''}`).join('\n') + (unplanned.length > 3 ? `\n• and ${unplanned.length - 3} more` : '');
     const frag = document.createDocumentFragment();
-    frag.createDiv({ text: `Nothing booked for ${plural(unplanned.length, 'task')} coming up:` });
+    frag.createDiv({ text: `Not enough time booked for ${plural(unplanned.length, 'task')} coming up:` });
     frag.createDiv({ cls: 'wtl-nag-list', text: names });
     frag.createEl('a', { text: 'Plan them now' });
     const notice = new Notice(frag, 0); // stays until clicked
     notice.noticeEl.addEventListener('click', () => this.openUpcoming());
+  }
+
+  /** How many hours a task needs in all (null clears it). */
+  async setEstimate(task, hours) {
+    const s = this.settings;
+    s.estimates = s.estimates || {};
+    if (hours) s.estimates[task.key] = Math.round(hours * 100) / 100;
+    else delete s.estimates[task.key];
+    await this.saveSettings();
+    this.refreshUpcoming(0);
   }
 
   /** "No plan needed" for a small task (or undo it). */
@@ -4846,7 +4929,8 @@ class TimeLogSettings extends PluginSettingTab {
     }
     new Setting(containerEl)
       .setName('What needs a plan')
-      .setDesc('Tasks like this with nothing booked are flagged until you book time or say "no plan needed".')
+      .setDesc('Tasks like this with nothing booked are flagged until you book time or say "no plan needed". ' +
+        'A task you gave an estimate (in its details) is flagged while what\'s done and booked before it\'s due falls short.')
       .addDropdown(d => d
         .addOptions({
           dated: 'Anything scheduled or due in the next 2 weeks',
@@ -4874,5 +4958,7 @@ module.exports.bucketOf = bucketOf;
 module.exports.taskHours = taskHours;
 module.exports.whenLabel = whenLabel;
 module.exports.withDate = withDate;
+module.exports.parseHours = parseHours;
+module.exports.deadlineOf = deadlineOf;
 module.exports.lineOf = lineOf;
 module.exports.parseTask = parseTask;

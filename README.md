@@ -49,7 +49,9 @@ A label by the cursor says which it will be.
 
 If dragging isn't handy, **click the task** and search under *Add a block*: any block from the last 8 weeks or coming up can be added (*now: …* says if it's counted for another task; adding it moves it). Blocks also count by themselves when their title shares words or tags with the task, and so does a time on the task's own line (Full Calendar writes one if you drag the task's own box into a time slot, e.g. `10:00 - 11:30 Write intro ⏳ 2026-11-02`).
 
-**Needs a plan**: any task scheduled (⏳) or due (📅) in the next two weeks, or overdue, with nothing booked for it. These are listed first in red, counted in the status bar, and once a day a notice lists them. Big or small isn't asked up front. For small ones, the bell-off icon says *no plan needed* and the task stops being flagged (undo under Settings → *No plan needed*). Booking time also clears it. For fewer flags, Settings → *What needs a plan* → *Only 📅 deadlines* flags just deadlines, plus tasks you've already logged time on.
+**Is it enough? Estimates.** Click a task and type how long it needs in all under *Needs* (`6`, `1.5`, `6h`, `90m`). Its line then shows done and booked against that, `5/6h`, with **short 1h** in red when it doesn't add up. Booked time counts up to the deadline (📅, else ⏳); blocks booked after it are listed under *After due* and don't count. With an estimate, *Needs a plan* means "short before its deadline" rather than "nothing booked". To plan several deadlines, go through them in date order and make each one stop being short.
+
+**Needs a plan**: any task scheduled (⏳) or due (📅) in the next two weeks, or overdue, with nothing booked for it (or, with an estimate, not enough). These are listed first in red, counted in the status bar, and once a day a notice lists them. Big or small isn't asked up front. For small ones, the bell-off icon says *no plan needed* and the task stops being flagged (undo under Settings → *No plan needed*). Booking time also clears it. For fewer flags, Settings → *What needs a plan* → *Only 📅 deadlines* flags just deadlines, plus tasks you've already logged time on.
 
 ## Automatic
 

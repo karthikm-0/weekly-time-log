@@ -442,6 +442,8 @@ body.theme-dark {
   white-space: nowrap;
 }
 .wtl-up-booked { color: var(--text-accent); }
+.wtl-up-short { color: var(--text-error); margin-left: 4px; font-weight: 600; }
+.wtl-up-estimate { width: 5.5em; padding: 0 6px; height: 22px; font-size: var(--font-ui-smaller); }
 .wtl-up-when.is-due { color: var(--text-warning); }
 .wtl-up-list.is-late .wtl-up-when { color: var(--text-error); }
 .wtl-up-push { flex: none; padding: 2px; opacity: 0; }
