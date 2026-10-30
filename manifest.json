@@ -3,7 +3,7 @@
   "name": "Weekly Time Log",
   "version": "0.6.0",
   "minAppVersion": "1.5.0",
-  "description": "Builds a weekly time log from Full Calendar Remastered blocks, matched to your open Tasks. Shows what's coming up and helps you book time for it. Charts and CSV export.",
+  "description": "Builds a weekly time log from Full Calendar Remastered blocks, matched to your open Tasks. Shows what's coming up and what still needs time on your calendar. Charts and CSV export.",
   "author": "Karthik",
   "isDesktopOnly": false
 }
