@@ -2649,7 +2649,8 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
   /** Makes a calendar event titled like the task, so the log matches it to the task. Asks for "Write events" access the first time. */
   async createBlock(calendarId, title, start, end) {
     const event = {
-      type: 'single', title, allDay: false, date: start.format('YYYY-MM-DD'), endDate: null,
+      type: 'single', title, allDay: false, date: start.format('YYYY-MM-DD'),
+      endDate: end.isSame(start, 'day') ? null : end.format('YYYY-MM-DD'), // past midnight: ends the next day
       startTime: start.format('HH:mm'), endTime: end.format('HH:mm'),
     };
     const api = await this.calendarApi();
