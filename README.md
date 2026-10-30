@@ -32,24 +32,18 @@ On first use, Full Calendar asks you to grant access. *Read events* and *Read pr
 A sidebar panel (calendar-clock ribbon icon, or *Open coming up*; it opens by itself the first time) so what's ahead stays in view:
 
 - **Grid** of the next weeks (*Weeks ahead*, default 6), each day shaded by how many tasks are planned for it. Hover a day to see them; click it to list only that day.
-- **One line per task**, in sections: Needs a plan, Late, Today, Tomorrow, This week, Before meetings, Next week, Later, Not scheduled (folded). A task's day is its ⏳ scheduled date, else its 📅 due date. Tags show as a coloured dot. Tick the box to finish a task (through Tasks, so recurring tasks recur), click the text to open its note, or use ⏩ to move it to another day. **Double-click** a task for its details under it: scheduled and due dates (and how far off they are), tags, hours logged and the blocks booked for it, which note it's in, and buttons to open, schedule, move, finish or mute it.
-- **Hours** next to each task come from your calendar: `2h` logged is the Full Calendar events in the last 8 weeks that the log matched to the task, and `+1h` booked is the ones still ahead, up to its day (plus the task itself, if you gave it a time). Matches are either confirmed (you labelled the block in the weekly review) or guesses from the event's title and tags. Double-click a task to see every block behind its numbers, with guesses marked; review the week in the time log to fix a wrong one.
+- **One line per task**, in sections: Needs a plan, Late, Today, Tomorrow, This week, Before meetings, Next week, Later, Not scheduled (folded). A task's day is its ⏳ scheduled date, else its 📅 due date. Tags show as a coloured dot. Tick the box to finish a task (through Tasks, so recurring tasks recur), or use ⏩ to move it to another day. **Click** a task for its details under it: scheduled and due dates (and how far off they are), tags, hours logged and booked with every block behind them, which note it's in, a search to add blocks to it, and buttons to open, schedule, move, finish or mute it.
+- **Hours** next to each task come from your calendar: `2h` logged is the Full Calendar events in the last 8 weeks that the log matched to the task, and `+1h` booked is the ones still ahead, up to its day (plus the task itself, if you gave it a time). Matches are either confirmed (you labelled the block in the weekly review) or guesses from the event's title and tags. Click a task to see every block behind its numbers, with guesses marked; review the week in the time log to fix a wrong one.
 - **Before meetings**: calendar events in the next week, with the open actions from earlier meetings with the same people (from Meeting Log, if it's enabled).
 - **Status bar**: `2 to plan · 1 late · 3 today`; click it to open the panel. `show: upcoming` puts the same panel in a note.
 
 Tasks tagged with anything under *Leave out tags* (default `#papers_unread`), and tasks in your templates folder, aren't shown.
 
-**Scheduling happens in Full Calendar.** Open it beside the panel (the calendar-plus icon on a task, or *Schedule…* in its details, opens it), then **drag a task from Coming up onto the calendar**:
+**Booking time** happens in Full Calendar, the way you already make blocks. The calendar-plus icon on a task (or *Schedule…* in its details) opens it. A block counts for a task when:
 
-- onto a **time** in the week or day view: books a block for it (1 hour by default, under *Block length*) on your "Planned" calendar (or the one under *Book blocks on*), titled like the task. It works for any week the calendar is showing, so work due next week can be booked this week, and you can drop the same task again for more sessions. Stretch the block in Full Calendar to change its length. The first time, Full Calendar asks for *Write events* access.
-- onto a **day** (the all-day row, or month view): moves the task's ⏳ date there.
-
-A label by the cursor says which it will be. Booked time also counts if you make blocks yourself, or drag the task's own box from Full Calendar's all-day row into a time (Full Calendar then writes the time onto the task, e.g. `10:00 - 11:30 Write intro ⏳ 2026-11-02`):
-
-- a task with a time on its day is its own block;
-- any other upcoming block the log matches to the task counts too (the task's details list them).
-
-If a block of yours isn't matched, for example a generic "Deep work", double-click the task: *Your other blocks by then* lists unmatched blocks before its date, and *Use for this* links one to it.
+- the log matches it by itself (its title shares words or tags with the task), or
+- you add it to the task: click the task, then search under *Add a block*. Any block from the last 8 weeks or coming up can be added, and *now: …* says if it's counted for another task (adding it moves it). Before you type, it lists your unlabelled blocks nearest to now;
+- or the task has a time on its line (Full Calendar writes one if you drag the task's own box into a time slot, e.g. `10:00 - 11:30 Write intro ⏳ 2026-11-02`).
 
 **Needs a plan**: any task scheduled (⏳) or due (📅) in the next two weeks, or overdue, with nothing booked for it. These are listed first in red, counted in the status bar, and once a day a notice lists them. Big or small isn't asked up front. For small ones, the bell-off icon says *no plan needed* and the task stops being flagged (undo under Settings → *No plan needed*). Booking time also clears it. For fewer flags, Settings → *What needs a plan* → *Only 📅 deadlines* flags just deadlines, plus tasks you've already logged time on.
 

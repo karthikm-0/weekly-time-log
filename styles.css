@@ -489,24 +489,15 @@ body.theme-dark {
 .wtl-up-details a { cursor: pointer; }
 .wtl-up-details-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .wtl-up-details-actions button { font-size: var(--font-ui-smaller); padding: 2px 10px; height: auto; }
-.wtl-up-details-own { width: auto; margin-top: 6px; }
-.wtl-up-details-ownrow { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
-.wtl-up-details-ownrow span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wtl-up-details-ownrow button { flex: none; font-size: var(--font-ui-smaller); padding: 1px 8px; height: auto; }
 .wtl-up-details-guess { color: var(--text-faint); font-style: italic; }
 
-/* Dragging a task onto Full Calendar */
-.wtl-up-row[draggable="true"] { cursor: grab; }
-.wtl-up-row .wtl-up-text { cursor: pointer; }
-.wtl-drop-hint {
-  position: fixed;
-  z-index: var(--layer-tooltip);
-  pointer-events: none;
-  padding: 3px 8px;
-  border-radius: 4px;
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  font-size: var(--font-ui-small);
-  box-shadow: var(--shadow-s);
-}
-.wtl-drop-hint.is-hidden { display: none; }
+/* Adding blocks to a task by hand */
+.wtl-up-add { margin-top: 6px; }
+.wtl-up-add-search { width: 100%; font-size: var(--font-ui-small); }
+.wtl-up-add-results { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
+.wtl-up-add-row { display: flex; align-items: center; gap: 8px; padding: 2px 4px; border-radius: 4px; font-size: var(--font-ui-smaller); }
+.wtl-up-add-row:hover { background: var(--background-modifier-hover); }
+.wtl-up-add-when { flex: none; width: 13em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.wtl-up-add-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wtl-up-add-other { flex: none; max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-style: italic; }
+.wtl-up-add-row button { flex: none; font-size: var(--font-ui-smaller); padding: 1px 8px; height: auto; }
