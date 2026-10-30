@@ -64,6 +64,7 @@ const DEFAULTS = {
   planRule: 'dated',       // what needs a plan: 'dated' (anything in the next 2 weeks) | 'due' (📅 deadlines)
   noPlanNeeded: {},        // task key -> day you said it doesn't need time booked
   estimates: {},           // task key -> hours you think it needs in all
+  actuals: {},             // task key -> { desc, tags, hours, done }: what finished tasks took (for suggestions)
   notFor: {},              // blockKey -> task keys you said the block isn't for (never guessed again)
   lastPlanNag: null,       // ISO date of the last "needs a plan" notice
   // blockKey -> { kind: 'task'|'tag'|'mix'|'none', task, taskDesc, taskPath, tasks, extraTags, tags, title, date }
@@ -1255,6 +1256,29 @@ function needsPlan(it, today, quiet, rule = 'dated') {
   return rule !== 'due' || !!h.logged;
 }
 
+/**
+ * An estimate for a task from what finished tasks like it took. `pool`: [{ desc, tags,
+ * hours, words }] from `actuals`. Alike means similar wording (a shared tag adds to
+ * it, but alone isn't enough). { hours, from: the closest ones } or null.
+ */
+function suggestEstimate(t, pool) {
+  const words = uniqTokens(t.desc);
+  if (!words.length) return null;
+  const tags = new Set((t.tags || []).map(x => x.toLowerCase()));
+  const like = [];
+  for (const a of pool) {
+    let score = similarity(words, a.words);
+    if (!score) continue;
+    if (a.tags.some(x => tags.has(x.toLowerCase()))) score += 0.2;
+    if (score >= 0.5) like.push({ desc: a.desc, hours: a.hours, score });
+  }
+  if (!like.length) return null;
+  const from = like.sort((x, y) => y.score - x.score).slice(0, 5);
+  const hs = from.map(x => x.hours).sort((x, y) => x - y);
+  const mid = hs.length % 2 ? hs[(hs.length - 1) / 2] : (hs[hs.length / 2 - 1] + hs[hs.length / 2]) / 2;
+  return { hours: Math.max(0.5, Math.round(mid * 2) / 2), from };
+}
+
 /** The day work on a task has to be done by: 📅 due, else ⏳ scheduled. */
 function deadlineOf(t) {
   return t.due || t.scheduled || null;
@@ -1572,6 +1596,10 @@ function upcomingRow(list, plugin, it, data, { section, state, redraw }) {
     hrs.createSpan({ text: `${fmtHours1(done + booked)}/${fmtHours1(it.estimate)}h` }).setAttr('aria-label',
       `Needs ${fmtHours1(it.estimate)}h: ${fmtHours1(done)}h done + ${fmtHours1(booked)}h booked${by}.\nClick the task to see the blocks.`);
     if (it.short) hrs.createSpan({ cls: 'wtl-up-short', text: `short ${fmtHours1(it.short)}h` });
+  } else if (it.suggest && !(h && (h.logged || h.booked))) {
+    row.createSpan({ cls: 'wtl-up-hours wtl-up-suggest', text: `~${fmtHours1(it.suggest.hours)}h?` }).setAttr('aria-label',
+      `Similar tasks took about ${fmtHours1(it.suggest.hours)}h: ${it.suggest.from.slice(0, 3).map(x => `${x.desc} (${fmtHours1(x.hours)}h)`).join(', ')}.\n` +
+      'Click the task to use it as its estimate.');
   } else if (h && (h.logged || h.booked)) {
     const hrs = row.createSpan({ cls: 'wtl-up-hours' });
     const n = bs => plural((bs || []).length, 'calendar block');
@@ -1692,6 +1720,14 @@ function taskDetails(list, plugin, it, data, state) {
       ? ` · ${fmtHours1((h.logged || 0) + (h.booked || 0))}h done and booked: short ${fmtHours1(it.short)}h`
       : ' · covered by what\'s done and booked');
     sum.toggleClass('wtl-up-details-warn', !!it.short);
+  } else if (it.suggest) {
+    // Learned from finished tasks like it: say which, and take it with one click.
+    est.setAttr('placeholder', `~${fmtHours1(it.suggest.hours)}h`);
+    const like = it.suggest.from.slice(0, 3).map(x => `"${x.desc}" ${fmtHours1(x.hours)}h`).join(', ');
+    sum.setText(` · similar tasks took: ${like}${it.suggest.from.length > 3 ? '…' : ''} `);
+    sum.addClass('wtl-muted');
+    const use = need.createEl('button', { cls: 'wtl-up-estimate-use', text: `Use ${fmtHours1(it.suggest.hours)}h` });
+    use.onclick = e => { e.stopPropagation(); plugin.setEstimate(t, it.suggest.hours); };
   } else {
     sum.setText(' · how long it takes in all, to check you\'ve booked enough');
     sum.addClass('wtl-muted');
@@ -1707,6 +1743,18 @@ function taskDetails(list, plugin, it, data, state) {
   };
   est.addEventListener('keydown', e => { if (e.key === 'Enter') est.blur(); });
   est.addEventListener('change', saveEst);
+  // Blocks still labelled with a task this note no longer has (reworded before renames
+  // were followed): offer to move them here.
+  for (const g of (plugin.orphanedTasks ? plugin.orphanedTasks(t.path, t.desc) : []).slice(0, 2)) {
+    const r = line('Was it…', `"${g.desc}" (${plural(g.blocks, 'block')}) `);
+    const mv = r.createEl('button', { text: 'Move them here' });
+    mv.onclick = async e => {
+      e.stopPropagation();
+      await plugin.rekeyTasks([[g.key, { key: t.key, desc: t.desc, path: t.path }]]);
+      new Notice(`${plural(g.blocks, 'block')} from "${g.desc}" now count for "${t.desc}".`);
+      plugin.refreshUpcoming(0);
+    };
+  }
   const where = line('In', '');
   const link = where.createEl('a', { text: t.path.replace(/\.md$/, '') });
   link.onclick = () => plugin.openTask(t);
@@ -1933,11 +1981,15 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
       // Coming up: rebuilt a moment after a note with tasks changes, and when the day turns over.
       const touches = path => this.upcomingPaths && this.upcomingPaths.has(path);
-      this.registerEvent(this.app.metadataCache.on('changed', (file, _data, cache) => {
+      this.registerEvent(this.app.metadataCache.on('changed', (file, data, cache) => {
+        this.followRenames(file.path, data);
         if (((cache && cache.listItems) || []).some(li => li.task !== undefined) || touches(file.path)) this.refreshUpcoming();
       }));
       this.registerEvent(this.app.vault.on('delete', file => { if (touches(file.path)) this.refreshUpcoming(); }));
-      this.registerEvent(this.app.vault.on('rename', (_file, old) => { if (touches(old)) this.refreshUpcoming(); }));
+      this.registerEvent(this.app.vault.on('rename', (file, old) => {
+        if (old.endsWith('.md')) this.followNoteRename(old, file.path);
+        if (touches(old)) this.refreshUpcoming();
+      }));
       this.registerInterval(window.setInterval(() => {
         if (this.upcomingDay && this.upcomingDay !== moment().format('YYYY-MM-DD')) this.refreshUpcoming();
       }, 5 * 60 * 1000));
@@ -2434,6 +2486,22 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       h.booked += b.hours;
       h.ahead.unshift({ title: 'this task, at the time you gave it', start: b.start, hours: b.hours, confirmed: true });
     }
+    // What finished tasks took, kept for good (logged time only reaches back a few
+    // weeks): estimates for new tasks are suggested from the ones like them.
+    s.actuals = s.actuals || {};
+    let learned = false;
+    for (const t of tasks) {
+      const h = t.done && hours.get(t.key);
+      if (!h || h.logged < 0.25) continue;
+      const took = Math.round(h.logged * 100) / 100;
+      const prev = s.actuals[t.key];
+      if (prev && prev.hours >= took) continue;
+      s.actuals[t.key] = { desc: t.desc, tags: t.tags, hours: took, done: t.doneDate };
+      learned = true;
+    }
+    if (learned) this.saveSettings();
+    const pool = Object.values(s.actuals).map(a => ({ desc: a.desc, tags: a.tags || [], hours: a.hours, words: uniqTokens(a.desc) }));
+
     const ws = weekStart.format('YYYY-MM-DD');
     // Only say something needs a plan once the calendar is in, or everything would look unbooked.
     const knowBooked = !calendarError && this.calendarSettled();
@@ -2447,6 +2515,8 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         const h = it.hours || {};
         const short = it.estimate - (h.logged || 0) - (h.booked || 0);
         it.short = short >= 0.25 ? short : 0; // under 15 minutes is close enough
+      } else {
+        it.suggest = suggestEstimate(t, pool);
       }
       it.unplanned = knowBooked && needsPlan(it, today, quiet, s.planRule);
       return it;
@@ -2538,6 +2608,121 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     frag.createEl('a', { text: 'Plan them now' });
     const notice = new Notice(frag, 0); // stays until clicked
     notice.noticeEl.addEventListener('click', () => this.openUpcoming());
+  }
+
+  /** Task keys and lines per note, as last read (path -> [{ key, line }]). */
+  get taskLines() {
+    if (!this._taskLines) this._taskLines = new Map();
+    return this._taskLines;
+  }
+
+  /**
+   * A task is known by its note and its wording. When you reword one (same line, new
+   * text), everything kept for it moves to the new wording: its blocks, estimate and
+   * the rest. `data`: the note's text now. Lines are compared with the last read.
+   */
+  followRenames(path, data) {
+    const before = this.taskLines.get(path);
+    const now = [];
+    (data || '').split('\n').forEach((l, i) => {
+      const t = parseTask(l, path, i);
+      if (t && t.desc) now.push(t);
+    });
+    this.taskLines.set(path, now.map(t => ({ key: t.key, line: t.line })));
+    if (!before) return;
+    const had = new Set(before.map(x => x.key));
+    const has = new Set(now.map(t => t.key));
+    const gone = before.filter(x => !has.has(x.key));
+    let fresh = now.filter(t => !had.has(t.key));
+    const moves = [];
+    for (const g of gone) {
+      // The new wording on the same line; or, if just one task changed, wherever it went.
+      const t = fresh.find(x => x.line === g.line) || (gone.length === 1 && fresh.length === 1 ? fresh[0] : null);
+      if (!t) continue;
+      moves.push([g.key, t]);
+      fresh = fresh.filter(x => x !== t);
+    }
+    if (moves.length) this.rekeyTasks(moves).then(changed => changed && this.refreshUpcoming(0));
+  }
+
+  /**
+   * Tasks in a note that blocks are still labelled with but that aren't in it any more
+   * (reworded, or deleted): [{ key, desc, blocks }], most like `desc` first.
+   */
+  orphanedTasks(path, desc) {
+    const live = new Set((this.taskLines.get(path) || []).map(x => x.key));
+    if (!live.size) return [];
+    const out = new Map();
+    for (const a of Object.values(this.settings.annotations || {})) {
+      const ts = a.kind === 'task' ? [{ key: a.task, desc: a.taskDesc, path: a.taskPath }] : (a.kind === 'mix' && a.tasks) || [];
+      for (const x of ts) {
+        if (!x.key || x.path !== path || live.has(x.key)) continue;
+        const o = out.get(x.key) || { key: x.key, desc: x.desc || x.key, blocks: 0 };
+        o.blocks++;
+        out.set(x.key, o);
+      }
+    }
+    const words = uniqTokens(desc);
+    return [...out.values()].sort((a, b) => similarity(words, uniqTokens(b.desc)) - similarity(words, uniqTokens(a.desc)));
+  }
+
+  /** A note was renamed: its tasks' keys start with its path, so move them along. */
+  followNoteRename(oldPath, newPath) {
+    const s = this.settings;
+    const keys = new Set([
+      ...Object.values(s.annotations || {}).flatMap(a => [a.task, ...(a.tasks || []).map(x => x.key)]),
+      ...['estimates', 'noPlanNeeded', 'actuals'].flatMap(n => Object.keys(s[n] || {})),
+      ...Object.values(s.notFor || {}).flat(),
+    ].filter(k => k && k.startsWith(`${oldPath}::`)));
+    const lines = this.taskLines.get(oldPath);
+    this.taskLines.delete(oldPath);
+    if (lines) this.taskLines.set(newPath, lines.map(x => ({ ...x, key: `${newPath}::${x.key.slice(oldPath.length + 2)}` })));
+    if (!keys.size) return;
+    const moves = [...keys].map(k => {
+      const desc = k.slice(oldPath.length + 2);
+      return [k, { key: `${newPath}::${desc}`, desc, path: newPath }];
+    });
+    this.rekeyTasks(moves).then(changed => changed && this.refreshUpcoming(0));
+  }
+
+  /**
+   * Moves everything kept under a task's old key to its new one. `moves`: [[oldKey,
+   * { key, desc, path }]]. True if anything moved.
+   */
+  async rekeyTasks(moves) {
+    const s = this.settings;
+    const to = new Map(moves.filter(([k, t]) => k !== t.key));
+    if (!to.size) return false;
+    let n = 0;
+    for (const a of Object.values(s.annotations || {})) {
+      if (a.kind === 'task' && to.has(a.task)) {
+        const t = to.get(a.task);
+        Object.assign(a, { task: t.key, taskDesc: t.desc, taskPath: t.path });
+        n++;
+      }
+      for (const x of (a.kind === 'mix' && a.tasks) || []) {
+        if (!to.has(x.key)) continue;
+        const t = to.get(x.key);
+        Object.assign(x, { key: t.key, desc: t.desc, path: t.path });
+        n++;
+      }
+    }
+    for (const name of ['estimates', 'noPlanNeeded', 'actuals']) {
+      const m = s[name] || {};
+      for (const [k, t] of to) {
+        if (!(k in m)) continue;
+        m[t.key] = name === 'actuals' ? { ...m[k], desc: t.desc } : m[k];
+        delete m[k];
+        n++;
+      }
+    }
+    for (const [bk, keys] of Object.entries(s.notFor || {})) {
+      if (!keys.some(k => to.has(k))) continue;
+      s.notFor[bk] = keys.map(k => (to.has(k) ? to.get(k).key : k));
+      n++;
+    }
+    if (n) await this.saveSettings();
+    return n > 0;
   }
 
   /** How many hours a task needs in all (null clears it). */
@@ -3046,9 +3231,12 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       const items = (cache && cache.listItems || []).filter(li => li.task !== undefined);
       if (!items.length) continue;
       const lines = (await this.app.vault.cachedRead(file)).split('\n');
+      const seen = [];
+      this.taskLines.set(file.path, seen); // to tell when one is reworded (followRenames)
       for (const li of items) {
         const t = parseTask(lines[li.position.start.line] || '', file.path, li.position.start.line);
         if (!t || !t.desc) continue;
+        seen.push({ key: t.key, line: t.line });
         // Open tasks, plus tasks finished during/after this week (the work may predate the checkmark).
         if (t.done && !(t.doneDate && t.doneDate >= weekStartIso)) continue;
         tasks.push(t);
@@ -4959,6 +5147,7 @@ module.exports.taskHours = taskHours;
 module.exports.whenLabel = whenLabel;
 module.exports.withDate = withDate;
 module.exports.parseHours = parseHours;
+module.exports.suggestEstimate = suggestEstimate;
 module.exports.deadlineOf = deadlineOf;
 module.exports.lineOf = lineOf;
 module.exports.parseTask = parseTask;
