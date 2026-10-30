@@ -517,3 +517,13 @@ body.theme-dark {
   box-shadow: var(--shadow-s);
 }
 .wtl-drop-hint.is-hidden { display: none; }
+.wtl-up-details-block { display: flex; align-items: center; gap: 4px; }
+.wtl-up-details-remove { padding: 0 2px; opacity: 0; --icon-size: 12px; }
+.wtl-up-details-block:hover .wtl-up-details-remove, .is-mobile .wtl-up-details-remove { opacity: 1; }
+.wtl-up-details-blocklink { cursor: pointer; }
+.wtl-up-details-blocklink:hover { color: var(--text-accent); text-decoration: underline; }
+.fc-event.wtl-flash { animation: wtl-flash 0.85s ease-in-out 3; z-index: 10; }
+@keyframes wtl-flash {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 3px var(--interactive-accent); }
+}

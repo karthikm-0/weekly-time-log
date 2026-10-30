@@ -63,6 +63,7 @@ const DEFAULTS = {
   planCalendar: null,      // Full Calendar calendar id those blocks go on (default: one called "Planned")
   planRule: 'dated',       // what needs a plan: 'dated' (anything in the next 2 weeks) | 'due' (📅 deadlines)
   noPlanNeeded: {},        // task key -> day you said it doesn't need time booked
+  notFor: {},              // blockKey -> task keys you said the block isn't for (never guessed again)
   lastPlanNag: null,       // ISO date of the last "needs a plan" notice
   // blockKey -> { kind: 'task'|'tag'|'mix'|'none', task, taskDesc, taskPath, tasks, extraTags, tags, title, date }
   // Every confirmed label; also the training data for future suggestions.
@@ -1524,10 +1525,20 @@ function upcomingRow(list, plugin, it, data, { section, state, redraw }) {
   if (color) dot.style.background = color;
 
   const text = row.createSpan({ cls: 'wtl-up-text', text: t.desc });
-  text.setAttr('aria-label', `${t.desc}\nDrag onto the calendar to book time · click for details`);
+  text.setAttr('aria-label', `${t.desc}\nDrag onto the calendar to book time · click for details · double-click to edit`);
+  // A click waits a moment, so a double-click (the Tasks edit dialog) doesn't also open the details.
+  let clickTimer = null;
   text.onclick = () => {
-    if (open) state.details.delete(detailKey); else state.details.add(detailKey);
-    redraw();
+    window.clearTimeout(clickTimer);
+    clickTimer = window.setTimeout(() => {
+      if (open) state.details.delete(detailKey); else state.details.add(detailKey);
+      redraw();
+    }, 250);
+  };
+  text.ondblclick = e => {
+    window.clearTimeout(clickTimer);
+    e.preventDefault();
+    plugin.editTaskInModal(t);
   };
 
   if (h && (h.logged || h.booked)) {
@@ -1601,10 +1612,21 @@ function taskDetails(list, plugin, it, data, state) {
     const sorted = bs.slice().sort((a, b) => (newestFirst ? b.start - a.start : a.start - b.start));
     for (const b of sorted.slice(0, 6)) {
       const r = box.createDiv({ cls: 'wtl-up-details-block' });
-      r.createSpan({ text: `${b.start.format('ddd MMM D, H:mm')} · ${b.title} · ${fmtSpan(b.hours)}` });
+      const label = r.createSpan({ cls: 'wtl-up-details-blocklink', text: `${b.start.format('ddd MMM D, H:mm')} · ${b.title} · ${fmtSpan(b.hours)}` });
+      label.setAttr('aria-label', 'Show it in Full Calendar');
+      label.onclick = e => { e.stopPropagation(); plugin.showInCalendar(b.start, b.key ? b.title : t.desc); };
       if (!b.confirmed) {
         r.createSpan({ cls: 'wtl-up-details-guess', text: ' · guess' })
-          .setAttr('aria-label', 'Matched by its title or tags, not reviewed yet. Review the week in the time log to confirm or change it.');
+          .setAttr('aria-label', 'Matched by its title or tags; you haven\'t confirmed it. ✕ if it\'s wrong.');
+      }
+      if (b.key) { // not the task's own time, which lives on its line
+        const x = r.createSpan({ cls: 'clickable-icon wtl-up-details-remove', attr: { 'aria-label': 'Not for this task' } });
+        setIcon(x, 'x');
+        x.onclick = async e => {
+          e.stopPropagation();
+          await plugin.notForTask(b.key, t);
+          new Notice(`"${b.title}" (${b.start.format('ddd MMM D')}) no longer counts for "${t.desc}".`);
+        };
       }
     }
     if (sorted.length > 6) box.createDiv({ cls: 'wtl-up-details-block', text: `and ${sorted.length - 6} more` });
@@ -1640,7 +1662,9 @@ function taskDetails(list, plugin, it, data, state) {
     for (const b of hits.slice(0, 8)) {
       const r = results.createDiv({ cls: 'wtl-up-add-row' });
       r.createSpan({ cls: 'wtl-up-add-when', text: `${b.start.format('ddd MMM D, H:mm')}${b.end.valueOf() <= now ? '' : ' (coming up)'}` });
-      r.createSpan({ cls: 'wtl-up-add-title', text: `${b.title} · ${fmtSpan(b.hours)}` });
+      const name = r.createSpan({ cls: 'wtl-up-add-title wtl-up-details-blocklink', text: `${b.title} · ${fmtSpan(b.hours)}` });
+      name.setAttr('aria-label', 'Show it in Full Calendar');
+      name.onclick = e => { e.stopPropagation(); plugin.showInCalendar(b.start, b.title); };
       const other = (b.tasks || []).filter(x => x.key !== t.key);
       if (other.length) {
         r.createSpan({ cls: 'wtl-up-add-other', text: `now: ${other.map(x => x.desc).join(', ')}` })
@@ -1671,6 +1695,7 @@ function taskDetails(list, plugin, it, data, state) {
     const b = acts.createEl('button', { cls, text: label });
     b.onclick = e => { e.stopPropagation(); fn(e); };
   };
+  act('Edit…', () => plugin.editTaskInModal(t));
   act('Open note', () => plugin.openTask(t));
   act('Schedule…', () => plugin.scheduleInCalendar(it), it.unplanned ? 'mod-cta' : '');
   act('Move…', e => moveMenu(plugin, it, data, e));
@@ -2454,6 +2479,37 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
   // ---- Planning ----------------------------------------------------------------
 
+  /** Opens Full Calendar at a block's day and time, and makes the block (found by `title`) flash. */
+  async showInCalendar(start, title) {
+    if (!this.app.commands.executeCommandById(`${FC_ID}:full-calendar-open`)) {
+      new Notice('Full Calendar Remastered is not enabled.');
+      return;
+    }
+    // The view can take a moment to build its calendar after opening.
+    let leaf = null;
+    for (let i = 0; i < 30; i++) {
+      leaf = this.app.workspace.getLeavesOfType('full-calendar-view').find(l => l.view && !l.view.inSidebar && l.view.fullCalendarView);
+      if (leaf) break;
+      await new Promise(r => window.setTimeout(r, 100));
+    }
+    const cal = leaf && leaf.view.fullCalendarView;
+    if (!cal || typeof cal.gotoDate !== 'function') {
+      new Notice(`Full Calendar is open; go to ${start.format('ddd MMM D, H:mm')} to find it.`);
+      return;
+    }
+    cal.gotoDate(start.toDate());
+    if (typeof cal.scrollToTime === 'function') cal.scrollToTime(moment.max(start.clone().subtract(1, 'hour'), start.clone().startOf('day')).format('HH:mm:ss'));
+    window.setTimeout(() => {
+      const day = start.format('YYYY-MM-DD');
+      for (const el of leaf.view.containerEl.querySelectorAll('.fc-event')) {
+        const col = el.closest('[data-date]');
+        if ((col && col.getAttribute('data-date') !== day) || !(el.textContent || '').includes(title)) continue;
+        el.addClass('wtl-flash');
+        window.setTimeout(() => el.removeClass('wtl-flash'), 2600);
+      }
+    }, 350);
+  }
+
   /** Opens Full Calendar, to drag the task onto it. */
   scheduleInCalendar(it) {
     if (!this.app.commands.executeCommandById(`${FC_ID}:full-calendar-open`)) {
@@ -2595,8 +2651,29 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     return fc.api.withToken(token);
   }
 
+  /**
+   * A block isn't for this task (a wrong guess, or one added by mistake): its label for
+   * the task is dropped, and the task is never guessed for it again (here or in the log).
+   */
+  async notForTask(blockKey, task) {
+    const s = this.settings;
+    s.notFor = s.notFor || {};
+    const no = s.notFor[blockKey] || (s.notFor[blockKey] = []);
+    if (!no.includes(task.key)) no.push(task.key);
+    const a = s.annotations[blockKey];
+    if (a && a.kind === 'task' && a.task === task.key) delete s.annotations[blockKey];
+    else if (a && a.kind === 'mix' && (a.tasks || []).some(x => x.key === task.key)) {
+      a.tasks = a.tasks.filter(x => x.key !== task.key);
+      if (!a.tasks.length && !(a.extraTags || []).length) delete s.annotations[blockKey];
+    }
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
   /** Labels one of your calendar blocks with a task, as confirming it in the log would. */
   async linkBlock(block, task) {
+    const no = (this.settings.notFor || {})[block.key];
+    if (no && no.includes(task.key)) this.settings.notFor[block.key] = no.filter(k => k !== task.key);
     const day = block.start.clone().startOf('day');
     const report = { start: day, end: day.clone().add(1, 'day'), blocks: [block], tasks: [task], tagCounts: this.collectVaultTags() };
     await this.annotate(report, block, { kind: 'task', task });
@@ -2617,6 +2694,18 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       return lines.join('\n');
     });
     if (!found) new Notice(`That task has changed since it was listed; open its note to ${what} it.`);
+  }
+
+  /** The Tasks plugin's own edit dialog for a task; what you save there goes back on its line. */
+  async editTaskInModal(task) {
+    const tasks = this.app.plugins.enabledPlugins.has(TASKS_ID) && this.app.plugins.plugins[TASKS_ID];
+    const api = tasks && tasks.apiV1;
+    if (!api || typeof api.editTaskLineModal !== 'function') {
+      new Notice('The Tasks plugin isn\'t enabled, so opening the task\'s note instead.');
+      return this.openTask(task);
+    }
+    const updated = await api.editTaskLineModal(task.raw); // resolves only when you save
+    if (updated && updated !== task.raw) await this.editTask(task, () => updated, 'edit');
   }
 
   /** Ticks a task off, through the Tasks plugin when it's there (done date, recurrence). */
@@ -2969,8 +3058,10 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       const votes = this.historyVotes(b, bTokens, bNorm, model);
       const tagP = this.predictTags(b, bTokens, votes, vocab, model);
       const candidates = [];
+      const notFor = (this.settings.notFor || {})[b.key] || [];
 
       for (const t of tasks) {
+        if (notFor.includes(t.key)) continue; // you said this block isn't for it
         const reasons = [];
         let text = 0;
         if (bNorm.length >= 4 && t.norm.length >= 4 && (bNorm.includes(t.norm) || t.norm.includes(bNorm))) {
