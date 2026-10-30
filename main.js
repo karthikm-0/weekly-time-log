@@ -60,7 +60,7 @@ const DEFAULTS = {
   upcomingOpened: false, // opened in the sidebar once on first run; after that, where you left it
   // Planning
   blockHours: 1,           // length of a block made by dropping a task on the calendar
-  planCalendar: null,      // Full Calendar calendar id those blocks go on (default: one called "Planned")
+  planCalendar: null,      // Full Calendar calendar id those blocks go on (null: the time goes on the task line)
   planRule: 'dated',       // what needs a plan: 'dated' (anything in the next 2 weeks) | 'due' (📅 deadlines)
   noPlanNeeded: {},        // task key -> day you said it doesn't need time booked
   notFor: {},              // blockKey -> task keys you said the block isn't for (never guessed again)
@@ -1325,6 +1325,27 @@ function withDate(line, iso) {
   return block ? line.slice(0, block.index) + stamp + block[0] : line.replace(/\s*$/, '') + stamp;
 }
 
+/**
+ * A task line booked on `iso` from `start` to `end` ("HH:mm"), written the way Full Calendar
+ * writes it when you drag a task into a slot: ⏳ set to that day, and the time as
+ * "10:00 - 11:00 Task" (`dayPlanner`) or "Task (10:00-11:00) ⏳ …". Any old time is replaced.
+ */
+function withTime(line, iso, start, end, format = 'dayPlanner', h24 = true) {
+  const m = line.match(/^(\s*(?:[-*+]|\d+[.)])\s+\[.\]\s+)(.*)$/);
+  if (!m) return line;
+  let body = m[2].replace(new RegExp(TASK_TIME.source, 'g'), '').replace(DAY_PLANNER_TIME, '');
+  const scheduled = /⏳️?\s*\d{4}-\d{2}-\d{2}/u;
+  if (scheduled.test(body)) body = body.replace(scheduled, `⏳ ${iso}`);
+  else {
+    const block = body.match(/\s\^[\w-]+\s*$/);
+    body = block ? `${body.slice(0, block.index)} ⏳ ${iso}${block[0]}` : `${body.replace(/\s*$/, '')} ⏳ ${iso}`;
+  }
+  const hm = x => moment(x, 'HH:mm').format(format === 'dayPlanner' || h24 ? 'H:mm' : 'h:mm A');
+  if (format === 'dayPlanner') return `${m[1]}${hm(start)} - ${hm(end)} ${body}`.trimEnd();
+  const at = body.indexOf('⏳');
+  return `${m[1]}${body.slice(0, at).trimEnd()} (${hm(start)}-${hm(end)}) ${body.slice(at)}`.trimEnd();
+}
+
 /** Where a task's line is now: where it was read, else the one line that still reads the same. */
 function lineOf(lines, task) {
   if (lines[task.line] === task.raw) return task.line;
@@ -2532,10 +2553,11 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const day = moment(spot.date).format('ddd MMM D');
     const hours = Number(this.settings.blockHours) || 1;
     const block = this.blockAt(spot);
+    const at = spot.time && `${fmtSpan(hours)} · ${day}, ${moment(spot.time, 'HH:mm').format('H:mm')}`;
     const text = block
       ? `Use "${block.title}" (${block.start.format('H:mm')}–${block.end.format('H:mm')}) for this`
       : spot.time
-        ? `Book ${fmtSpan(hours)} · ${day}, ${moment(spot.time, 'HH:mm').format('H:mm')}`
+        ? (this.settings.planCalendar || !taskBlock(this.dragging.task) ? `Book ${at}` : `Move its time to ${at}`)
         : `Move to ${day}`;
     if (!this.dropHint) this.dropHint = document.body.createDiv({ cls: 'wtl-drop-hint' });
     this.dropHint.setText(text);
@@ -2593,6 +2615,18 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     }
     const start = moment(`${spot.date} ${spot.time}`, 'YYYY-MM-DD HH:mm');
     const end = start.clone().add((Number(this.settings.blockHours) || 1) * 60, 'minutes');
+    // By default the task itself is the block, as when you drag its box in Full Calendar.
+    if (!this.settings.planCalendar) {
+      const fc = this.app.plugins.plugins[FC_ID];
+      let fcs = (fc && fc.settings) || {};
+      if (!fcs.tasksIntegration && fc && fc.loadData) fcs = (await fc.loadData().catch(() => null)) || {};
+      const format = (fcs.tasksIntegration && fcs.tasksIntegration.taskDisplayFormat) || 'dayPlanner';
+      const had = taskBlock(t);
+      await this.editTask(t, line => withTime(line, spot.date, start.format('HH:mm'), end.format('HH:mm'), format, fcs.timeFormat24h !== false), 'book');
+      new Notice(`"${t.desc}" is now ${start.format('ddd MMM D, H:mm')}–${end.format('H:mm')}` +
+        `${had ? ` (moved from ${had.start.format('ddd H:mm')})` : ''}. Stretch it in the calendar to change its length.`);
+      return;
+    }
     try {
       const cal = await this.planCalendar();
       if (await this.createBlock(cal.id, t.desc, start, end)) {
@@ -4812,9 +4846,10 @@ class TimeLogSettings extends PluginSettingTab {
     if (sources.length) {
       new Setting(containerEl)
         .setName('Book blocks on')
-        .setDesc('The calendar a block goes on when you drop a task on a time.')
+        .setDesc('Where the time goes when you drop a task on a time. On the task itself, it shows on Full Calendar\'s ' +
+          'Tasks calendar and dropping again moves it; on a calendar, each drop makes a new event there.')
         .addDropdown(d => {
-          d.addOption('', 'A calendar called "Planned", if there is one');
+          d.addOption('', 'The task itself (its line gets the time)');
           for (const src of sources.filter(x => x.type !== 'tasks')) d.addOption(src.id, src.name || src.id);
           d.setValue(s.planCalendar || '').onChange(async v => { s.planCalendar = v || null; await this.plugin.saveSettings(); });
         });
@@ -4849,5 +4884,6 @@ module.exports.bucketOf = bucketOf;
 module.exports.taskHours = taskHours;
 module.exports.whenLabel = whenLabel;
 module.exports.withDate = withDate;
+module.exports.withTime = withTime;
 module.exports.lineOf = lineOf;
 module.exports.parseTask = parseTask;

@@ -41,7 +41,7 @@ Tasks tagged with anything under *Leave out tags* (default `#papers_unread`), an
 
 **Booking time: drag a task onto Full Calendar.** Open the calendar beside the panel (the calendar-plus icon on a task, or *Schedule…* in its details, opens it), go to any week, and drag a task from Coming up:
 
-- onto **empty time**: books a block for it (1 hour by default, under *Block length*) on your "Planned" calendar (or the one under *Book blocks on*), titled like the task. Stretch it in Full Calendar to change its length; drop the task again for more sessions. The first time, Full Calendar asks for *Write events* access.
+- onto **empty time**: the task gets that time (1 hour by default, under *Block length*), written on its line the way Full Calendar does when you drag a task's box: `10:00 - 11:00 Write intro ⏳ 2026-11-03`. The task itself is the block, on Full Calendar's Tasks calendar; nothing goes to Google or any other calendar. Stretch it in Full Calendar to change its length; dropping it again moves it. To get a new event per drop instead (for several sessions), pick a calendar under *Book blocks on*; the first time, Full Calendar asks for *Write events* access.
 - onto **a block you already have** (a "Deep work", or a past event): that block now counts for the task, and nothing new is made.
 - onto **a day** (the all-day row, or month view): moves the task's ⏳ date there.
 
