@@ -61,7 +61,7 @@ const DEFAULTS = {
   upcomingSkipTags: '#papers_unread', // tasks with these tags are left out
   upcomingOpened: false, // opened in the sidebar once on first run; after that, where you left it
   fcAllTasks: true,      // put the tasks Full Calendar leaves out (only ⏳, or only 📅) on its calendars too
-  fcTaskColor: '',       // their colour; '' draws them like Full Calendar's own tasks
+  fcTaskColor: '',       // their colour; '' uses Full Calendar's Tasks calendar colour
   // Planning
   blockHours: 1,           // length of a block made by dropping a task on the calendar
   planCalendar: null,      // Full Calendar calendar id those blocks go on (default: one called "Planned")
@@ -1241,11 +1241,10 @@ const LATER_SHOWN = 8; // "Later" lists this many, then "N more"
 const PLAN_DAYS = 14;  // deadlines this close need time booked
 
 /**
- * Whether a task should have time booked and has none. `rule` 'dated': anything
- * planned (⏳ or 📅) for the next two weeks, or overdue. 'due': only 📅 deadlines
- * then, plus tasks planned for then that you've already logged time on (so they're
- * more than one sitting). Telling a task "no plan needed" (`quiet`, by task key)
- * turns this off for it for good.
+ * Whether a task should have time put in and has none: no hours logged or booked.
+ * `rule` 'dated': anything planned (⏳ or 📅) for the next two weeks, or overdue.
+ * 'due': only 📅 deadlines then. Telling a task "no plan needed" (`quiet`, by task
+ * key) turns this off for it for good.
  */
 function needsPlan(it, today, quiet, rule = 'dated') {
   const t = it.task;
@@ -1254,10 +1253,10 @@ function needsPlan(it, today, quiet, rule = 'dated') {
   const soon = moment(today).add(PLAN_DAYS, 'days').format('YYYY-MM-DD');
   // With an estimate: time done and booked before its deadline doesn't cover it.
   if (it.estimate) return !!it.short && ((!!t.due && t.due <= soon) || (!!it.date && it.date <= soon));
-  if (h.booked) return false;
+  // Hours already in it, done or ahead: you're on it.
+  if (h.booked || h.logged) return false;
   if (t.due && t.due <= soon) return true;
-  if (!it.date || it.date > soon) return false;
-  return rule !== 'due' || !!h.logged;
+  return rule !== 'due' && !!it.date && it.date <= soon;
 }
 
 /**
@@ -2817,31 +2816,33 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
    * Full Calendar puts tasks on one date, its "Calendar display date field" (⏳ or 📅),
    * and leaves out tasks that only have the other. Those are added to its calendars
    * here as events of their own (from Coming up, so tags left out there are left out
-   * here too), marked with the date they're on. Full Calendar itself isn't changed.
+   * here too), in the colour of its Tasks calendar. Full Calendar itself isn't changed.
    */
   async syncExtraTasks() {
     const data = this.upcomingData;
     const fc = this.app.plugins.enabledPlugins.has(FC_ID) && this.app.plugins.plugins[FC_ID];
     if (!fc || !data || !data.items) return;
     let shown = 'scheduledDate';
+    this.extraColor = null;
     try {
       const saved = await fc.loadData();
       shown = (saved && saved.tasksIntegration && saved.tasksIntegration.calendarDisplayDateTarget) || shown;
+      const src = ((saved && saved.calendarSources) || []).find(x => x.type === 'tasks');
+      this.extraColor = (src && src.color) || null;
     } catch (e) {
-      // unreadable: Full Calendar's default
+      // unreadable: Full Calendar's defaults
     }
     // The date the left-out tasks have, and the one they don't.
     const has = { scheduledDate: 'due', dueDate: 'scheduled' }[shown];
     const lacks = has === 'due' ? 'scheduled' : 'due';
     const items = this.settings.fcAllTasks && has ? data.items.filter(it => it.task[has] && !it.task[lacks]) : [];
-    const mark = has === 'due' ? '📅' : '⏳';
     this.extraItems = items;
     this.extraEvents = items.map((it, i) => {
       const t = it.task;
       const b = taskBlock(t);
       return {
         id: `wtl-task-${i}`,
-        title: `${mark} ${t.desc}`,
+        title: t.desc,
         ...(b ? { start: b.start.toDate(), end: b.end.toDate(), allDay: false } : { start: t[has], allDay: true }),
         editable: false, // Full Calendar can't move what it doesn't know; dragging is handled here
         classNames: ['wtl-fc-task', `wtl-fc-task-${i}`],
@@ -2872,31 +2873,39 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         // Full Calendar drops every event source when it resyncs.
         cal.on('eventsSet', () => window.setTimeout(() => this.applyExtraTasks(), 0));
       }
-      const color = this.settings.fcTaskColor;
-      const look = color ? { backgroundColor: color, borderColor: color } : this.taskLook(cal);
-      const drawn = `${this.extraVersion}|${JSON.stringify(look)}`;
+      // Full Calendar's own event elements get their checkbox when they're drawn; these get theirs here.
+      if (cal.el && cal.wtlObserved !== this) {
+        cal.wtlObserved = this;
+        const watch = new MutationObserver(() => this.addExtraChecks(cal.el));
+        watch.observe(cal.el, { childList: true, subtree: true });
+        this.register(() => watch.disconnect());
+      }
+      const color = this.settings.fcTaskColor || this.extraColor;
+      const drawn = `${this.extraVersion}|${color}`;
       const src = cal.getEventSourceById(FC_EXTRA);
       if (src && cal.wtlExtra === drawn) continue;
       if (src) src.remove();
       cal.wtlExtra = drawn;
+      const look = color ? { backgroundColor: color, borderColor: color } : {};
       cal.addEventSource({ id: FC_EXTRA, events: this.extraEvents.map(ev => ({ ...ev, ...look })) });
     }
   }
 
-  /**
-   * The colours Full Calendar draws its own tasks in on `cal` (read off one of them, so
-   * whatever sets them is followed), for the added ones to look the same. Null while
-   * none of its tasks is on screen.
-   */
-  taskLook(cal) {
-    for (const ev of cal.getEvents()) {
-      if (!ev.allDay || !ev.extendedProps || !ev.extendedProps.isTask || (ev.source && ev.source.id === FC_EXTRA)) continue;
-      const el = document.querySelector(`.fc-event[data-event-id="${CSS.escape(ev.id)}"]`);
-      if (!el) continue;
-      const css = getComputedStyle(el);
-      return { backgroundColor: css.backgroundColor, borderColor: css.borderTopColor, textColor: css.color };
+  /** A tick box on each added task, where Full Calendar puts its own (Full Calendar's classes, for its look). */
+  addExtraChecks(root) {
+    for (const el of root.querySelectorAll('.wtl-fc-task')) {
+      if (el.querySelector('.wtl-fc-check')) continue;
+      const it = this.extraItem(el);
+      const at = el.querySelector('.fc-event-time') || el.querySelector('.fc-event-title') || el.querySelector('.fc-list-event-title');
+      if (!it || !at) continue;
+      const cb = createEl('input', { type: 'checkbox', cls: ['wtl-fc-check', 'ofc-checkbox-white'] });
+      cb.onclick = e => {
+        e.stopPropagation();
+        this.completeTask(it.task);
+      };
+      at.addClass('ofc-has-checkbox');
+      at.prepend(cb);
     }
-    return null;
   }
 
   /** The Coming up item behind an added task's element. */
@@ -2907,6 +2916,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
 
   /** As with Full Calendar's own tasks: click edits it in the Tasks dialog, Cmd/Ctrl-click opens its note. */
   onExtraClick(e) {
+    if (e.target.closest && e.target.closest('.wtl-fc-check')) return; // ticking it off
     const it = this.extraItem(extraEl(e.target));
     if (!it) return;
     e.preventDefault();
@@ -5248,7 +5258,7 @@ class TimeLogSettings extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Show every task in Full Calendar')
       .setDesc('Full Calendar shows tasks on one date (⏳ or 📅, as set in its Tasks settings) and leaves out tasks ' +
-        'that only have the other. Add those to it too, marked with their date. Click one to edit it (Cmd/Ctrl-click opens its note), right-click to ' +
+        'that only have the other. Add those to it too. Click one to edit it (Cmd/Ctrl-click opens its note), right-click to ' +
         'move it, or drag it to another day.')
       .addToggle(t => t.setValue(s.fcAllTasks !== false).onChange(async v => {
         s.fcAllTasks = v;
@@ -5257,13 +5267,13 @@ class TimeLogSettings extends PluginSettingTab {
       }));
     new Setting(containerEl)
       .setName('Their colour')
-      .setDesc('The colour of the tasks added to Full Calendar. Reset to draw them like its own tasks.')
+      .setDesc('The colour of the tasks added to Full Calendar. Reset to use its Tasks calendar\'s colour.')
       .addColorPicker(c => c.setValue(s.fcTaskColor || '#808080').onChange(async v => {
         s.fcTaskColor = v;
         await this.plugin.saveSettings();
         this.plugin.syncExtraTasks();
       }))
-      .addExtraButton(b => b.setIcon('rotate-ccw').setTooltip('Like Full Calendar\'s tasks').onClick(async () => {
+      .addExtraButton(b => b.setIcon('rotate-ccw').setTooltip('Its Tasks calendar\'s colour').onClick(async () => {
         s.fcTaskColor = '';
         await this.plugin.saveSettings();
         this.plugin.syncExtraTasks();
@@ -5288,12 +5298,12 @@ class TimeLogSettings extends PluginSettingTab {
     }
     new Setting(containerEl)
       .setName('What needs a plan')
-      .setDesc('Tasks like this with nothing booked are flagged until you book time or say "no plan needed". ' +
+      .setDesc('Tasks like this with no hours logged or booked are flagged until you put time in or say "no plan needed". ' +
         'A task you gave an estimate (in its details) is flagged while what\'s done and booked before it\'s due falls short.')
       .addDropdown(d => d
         .addOptions({
           dated: 'Anything scheduled or due in the next 2 weeks',
-          due: 'Only 📅 deadlines (and tasks you\'ve logged time on)',
+          due: 'Only 📅 deadlines',
         })
         .setValue(s.planRule || 'dated')
         .onChange(async v => { s.planRule = v; await changed(); }));

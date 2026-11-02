@@ -55,7 +55,7 @@ Estimates are also **learned**: when you finish a task, the hours logged on it a
 
 **Rewording a task** keeps everything attached to it (its blocks, estimate, ✕s, "no plan needed"), and so does renaming its note. If blocks were attached under wording a note no longer has, the task's details offer them back: *Was it… "old wording" (3 blocks) · Move them here*.
 
-**Needs a plan**: any task scheduled (⏳) or due (📅) in the next two weeks, or overdue, with nothing booked for it (or, with an estimate, not enough). These are listed first in red, counted in the status bar, and once a day a notice lists them. Big or small isn't asked up front. For small ones, the bell-off icon says *no plan needed* and the task stops being flagged (undo under Settings → *No plan needed*). Booking time also clears it. For fewer flags, Settings → *What needs a plan* → *Only 📅 deadlines* flags just deadlines, plus tasks you've already logged time on.
+**Needs a plan**: any task scheduled (⏳) or due (📅) in the next two weeks, or overdue, with no hours logged or booked for it (or, with an estimate, not enough). These are listed first in red, counted in the status bar, and once a day a notice lists them. Big or small isn't asked up front. For small ones, the bell-off icon says *no plan needed* and the task stops being flagged (undo under Settings → *No plan needed*). Booking time also clears it. For fewer flags, Settings → *What needs a plan* → *Only 📅 deadlines* flags just deadlines, plus tasks you've already logged time on.
 
 ## Automatic
 
