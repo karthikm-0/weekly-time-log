@@ -9,6 +9,8 @@ const VIEW_TYPE = 'weekly-time-log-view';
 const TRACKER_VIEW = 'weekly-time-log-tracker';
 const UPCOMING_VIEW = 'weekly-time-log-upcoming';
 const FC_ID = 'full-calendar-remastered';
+const FC_VIEWS = ['full-calendar-view', 'full-calendar-sidebar-view'];
+const FC_EXTRA = 'wtl-tasks'; // the event source of tasks Full Calendar leaves out
 const TASKS_ID = 'obsidian-tasks-plugin';
 const MEETING_LOG_ID = 'meeting-log';
 
@@ -58,6 +60,7 @@ const DEFAULTS = {
   upcomingLookback: 8,   // weeks back that logged time counts towards a task
   upcomingSkipTags: '#papers_unread', // tasks with these tags are left out
   upcomingOpened: false, // opened in the sidebar once on first run; after that, where you left it
+  fcAllTasks: true,      // put the tasks Full Calendar leaves out (only ⏳, or only 📅) on its calendars too
   // Planning
   blockHours: 1,           // length of a block made by dropping a task on the calendar
   planCalendar: null,      // Full Calendar calendar id those blocks go on (default: one called "Planned")
@@ -1408,6 +1411,11 @@ function calendarSpotAt(x, y) {
   return day ? { date: day.dataset.date.slice(0, 10), time: null } : null;
 }
 
+/** The event element of a task this plugin added to Full Calendar, under `target`, or null. */
+function extraEl(target) {
+  return target && target.closest ? target.closest('.wtl-fc-task') : null;
+}
+
 /** What a Coming up panel remembers between redraws. */
 function upcomingState() {
   return { folded: new Set(['undated']), day: null, more: false, open: new Set(), details: new Set() };
@@ -1922,6 +1930,14 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     // Tasks dragged from Coming up onto Full Calendar.
     this.registerDomEvent(document, 'dragover', e => this.onDragOver(e), true);
     this.registerDomEvent(document, 'drop', e => this.onDrop(e), true);
+    // Tasks this plugin adds to Full Calendar: click, right-click and drag are handled
+    // here, before Full Calendar sees them (it only knows its own events).
+    this.registerDomEvent(document, 'click', e => this.onExtraClick(e), true);
+    this.registerDomEvent(document, 'contextmenu', e => this.onExtraMenu(e), true);
+    this.registerDomEvent(document, 'mousedown', e => { const el = extraEl(e.target); if (el) el.draggable = true; }, true);
+    this.registerDomEvent(document, 'dragstart', e => this.onExtraDragStart(e), true);
+    // A calendar opened or rebuilt since: give it the tasks again.
+    this.registerInterval(window.setInterval(() => this.applyExtraTasks(), 2000));
     // New or replaced aTimeLogger exports in the vault folder: re-read and redraw.
     const onFile = file => {
       if (!file || !file.path || !/\.csv$/i.test(file.path)) return;
@@ -2059,6 +2075,11 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
   onunload() {
     if (this.probeHost) this.probeHost.remove();
     if (this.dropHint) this.dropHint.remove();
+    this.extraEvents = null;
+    for (const cal of this.fullCalendars()) {
+      const src = cal.getEventSourceById(FC_EXTRA);
+      if (src) src.remove();
+    }
   }
 
   // ---- Tracker -------------------------------------------------------------
@@ -2408,6 +2429,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
       this.upcomingPromise.then(data => {
         this.upcomingData = data;
         this.updateDueStatus(data);
+        this.syncExtraTasks();
       });
     }
     return this.upcomingPromise;
@@ -2786,6 +2808,111 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     }
     new Notice(`Drag "${it.task.desc}" from Coming up onto a time in the calendar (any week) to book a block for it, ` +
       'or onto a block you already have to use that one. Drop it on a day to move it there.', 8000);
+  }
+
+  // ---- Tasks Full Calendar leaves out ----------------------------------------
+
+  /**
+   * Full Calendar puts tasks on one date, its "Calendar display date field" (⏳ or 📅),
+   * and leaves out tasks that only have the other. Those are added to its calendars
+   * here as events of their own (from Coming up, so tags left out there are left out
+   * here too), marked with the date they're on. Full Calendar itself isn't changed.
+   */
+  async syncExtraTasks() {
+    const data = this.upcomingData;
+    const fc = this.app.plugins.enabledPlugins.has(FC_ID) && this.app.plugins.plugins[FC_ID];
+    if (!fc || !data || !data.items) return;
+    let shown = 'scheduledDate';
+    try {
+      const saved = await fc.loadData();
+      shown = (saved && saved.tasksIntegration && saved.tasksIntegration.calendarDisplayDateTarget) || shown;
+    } catch (e) {
+      // unreadable: Full Calendar's default
+    }
+    // The date the left-out tasks have, and the one they don't.
+    const has = { scheduledDate: 'due', dueDate: 'scheduled' }[shown];
+    const lacks = has === 'due' ? 'scheduled' : 'due';
+    const items = this.settings.fcAllTasks && has ? data.items.filter(it => it.task[has] && !it.task[lacks]) : [];
+    const mark = has === 'due' ? '📅' : '⏳';
+    this.extraItems = items;
+    this.extraEvents = items.map((it, i) => {
+      const t = it.task;
+      const b = taskBlock(t);
+      const color = t.tags.map(tg => this.tagColor(tg)).find(Boolean);
+      return {
+        id: `wtl-task-${i}`,
+        title: `${mark} ${t.desc}`,
+        ...(b ? { start: b.start.toDate(), end: b.end.toDate(), allDay: false } : { start: t[has], allDay: true }),
+        editable: false, // Full Calendar can't move what it doesn't know; dragging is handled here
+        classNames: ['wtl-fc-task', `wtl-fc-task-${i}`],
+        ...(color ? { borderColor: color } : {}),
+      };
+    });
+    this.extraVersion = (this.extraVersion || 0) + 1;
+    this.applyExtraTasks();
+  }
+
+  /** The FullCalendar instances of the Full Calendar views open now. */
+  fullCalendars() {
+    const out = [];
+    for (const type of FC_VIEWS) {
+      for (const leaf of this.app.workspace.getLeavesOfType(type)) {
+        const cal = leaf.view && leaf.view.fullCalendarView;
+        if (cal && typeof cal.addEventSource === 'function') out.push(cal);
+      }
+    }
+    return out;
+  }
+
+  /** Puts the tasks from `syncExtraTasks` on every open calendar, again whenever one reloads its events. */
+  applyExtraTasks() {
+    if (!this.extraEvents) return;
+    for (const cal of this.fullCalendars()) {
+      if (cal.wtlHooked !== this) {
+        cal.wtlHooked = this;
+        // Full Calendar drops every event source when it resyncs.
+        cal.on('eventsSet', () => window.setTimeout(() => this.applyExtraTasks(), 0));
+      }
+      const src = cal.getEventSourceById(FC_EXTRA);
+      if (src && cal.wtlExtra === this.extraVersion) continue;
+      if (src) src.remove();
+      cal.wtlExtra = this.extraVersion;
+      cal.addEventSource({ id: FC_EXTRA, events: this.extraEvents });
+    }
+  }
+
+  /** The Coming up item behind an added task's element. */
+  extraItem(el) {
+    const m = el && el.className.match(/\bwtl-fc-task-(\d+)\b/);
+    return m && this.extraItems ? this.extraItems[Number(m[1])] || null : null;
+  }
+
+  onExtraClick(e) {
+    const it = this.extraItem(extraEl(e.target));
+    if (!it) return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.openTask(it.task);
+  }
+
+  onExtraMenu(e) {
+    const it = this.extraItem(extraEl(e.target));
+    if (!it || !this.upcomingData) return;
+    e.preventDefault();
+    e.stopPropagation();
+    moveMenu(this, it, this.upcomingData, e);
+  }
+
+  /** Dragging an added task works as from Coming up: a day moves it there, a time books a block. */
+  onExtraDragStart(e) {
+    const el = extraEl(e.target);
+    const it = this.extraItem(el);
+    if (!it) return;
+    e.stopPropagation();
+    e.dataTransfer.setData('text/plain', it.task.desc);
+    e.dataTransfer.effectAllowed = 'copyMove';
+    this.dragging = it;
+    el.addEventListener('dragend', () => this.endDrag(), { once: true });
   }
 
   // ---- Dragging tasks onto Full Calendar -------------------------------------
@@ -5097,6 +5224,16 @@ class TimeLogSettings extends PluginSettingTab {
       .addText(t => t.setPlaceholder('#papers_unread').setValue(s.upcomingSkipTags || '').onChange(async v => {
         s.upcomingSkipTags = v;
         await changed();
+      }));
+    new Setting(containerEl)
+      .setName('Show every task in Full Calendar')
+      .setDesc('Full Calendar shows tasks on one date (⏳ or 📅, as set in its Tasks settings) and leaves out tasks ' +
+        'that only have the other. Add those to it too, marked with their date. Click one to open it, right-click to ' +
+        'move it, or drag it to another day.')
+      .addToggle(t => t.setValue(s.fcAllTasks !== false).onChange(async v => {
+        s.fcAllTasks = v;
+        await this.plugin.saveSettings();
+        this.plugin.syncExtraTasks();
       }));
     new Setting(containerEl)
       .setName('Block length')
