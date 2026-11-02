@@ -61,6 +61,7 @@ const DEFAULTS = {
   upcomingSkipTags: '#papers_unread', // tasks with these tags are left out
   upcomingOpened: false, // opened in the sidebar once on first run; after that, where you left it
   fcAllTasks: true,      // put the tasks Full Calendar leaves out (only ⏳, or only 📅) on its calendars too
+  fcTaskColor: '',       // their colour; '' draws them like Full Calendar's own tasks
   // Planning
   blockHours: 1,           // length of a block made by dropping a task on the calendar
   planCalendar: null,      // Full Calendar calendar id those blocks go on (default: one called "Planned")
@@ -2871,7 +2872,8 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         // Full Calendar drops every event source when it resyncs.
         cal.on('eventsSet', () => window.setTimeout(() => this.applyExtraTasks(), 0));
       }
-      const look = this.taskLook(cal);
+      const color = this.settings.fcTaskColor;
+      const look = color ? { backgroundColor: color, borderColor: color } : this.taskLook(cal);
       const drawn = `${this.extraVersion}|${JSON.stringify(look)}`;
       const src = cal.getEventSourceById(FC_EXTRA);
       if (src && cal.wtlExtra === drawn) continue;
@@ -5252,6 +5254,20 @@ class TimeLogSettings extends PluginSettingTab {
         s.fcAllTasks = v;
         await this.plugin.saveSettings();
         this.plugin.syncExtraTasks();
+      }));
+    new Setting(containerEl)
+      .setName('Their colour')
+      .setDesc('The colour of the tasks added to Full Calendar. Reset to draw them like its own tasks.')
+      .addColorPicker(c => c.setValue(s.fcTaskColor || '#808080').onChange(async v => {
+        s.fcTaskColor = v;
+        await this.plugin.saveSettings();
+        this.plugin.syncExtraTasks();
+      }))
+      .addExtraButton(b => b.setIcon('rotate-ccw').setTooltip('Like Full Calendar\'s tasks').onClick(async () => {
+        s.fcTaskColor = '';
+        await this.plugin.saveSettings();
+        this.plugin.syncExtraTasks();
+        this.display();
       }));
     new Setting(containerEl)
       .setName('Block length')
