@@ -2838,14 +2838,12 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     this.extraEvents = items.map((it, i) => {
       const t = it.task;
       const b = taskBlock(t);
-      const color = t.tags.map(tg => this.tagColor(tg)).find(Boolean);
       return {
         id: `wtl-task-${i}`,
         title: `${mark} ${t.desc}`,
         ...(b ? { start: b.start.toDate(), end: b.end.toDate(), allDay: false } : { start: t[has], allDay: true }),
         editable: false, // Full Calendar can't move what it doesn't know; dragging is handled here
         classNames: ['wtl-fc-task', `wtl-fc-task-${i}`],
-        ...(color ? { borderColor: color } : {}),
       };
     });
     this.extraVersion = (this.extraVersion || 0) + 1;
@@ -2873,12 +2871,30 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
         // Full Calendar drops every event source when it resyncs.
         cal.on('eventsSet', () => window.setTimeout(() => this.applyExtraTasks(), 0));
       }
+      const look = this.taskLook(cal);
+      const drawn = `${this.extraVersion}|${JSON.stringify(look)}`;
       const src = cal.getEventSourceById(FC_EXTRA);
-      if (src && cal.wtlExtra === this.extraVersion) continue;
+      if (src && cal.wtlExtra === drawn) continue;
       if (src) src.remove();
-      cal.wtlExtra = this.extraVersion;
-      cal.addEventSource({ id: FC_EXTRA, events: this.extraEvents });
+      cal.wtlExtra = drawn;
+      cal.addEventSource({ id: FC_EXTRA, events: this.extraEvents.map(ev => ({ ...ev, ...look })) });
     }
+  }
+
+  /**
+   * The colours Full Calendar draws its own tasks in on `cal` (read off one of them, so
+   * whatever sets them is followed), for the added ones to look the same. Null while
+   * none of its tasks is on screen.
+   */
+  taskLook(cal) {
+    for (const ev of cal.getEvents()) {
+      if (!ev.allDay || !ev.extendedProps || !ev.extendedProps.isTask || (ev.source && ev.source.id === FC_EXTRA)) continue;
+      const el = document.querySelector(`.fc-event[data-event-id="${CSS.escape(ev.id)}"]`);
+      if (!el) continue;
+      const css = getComputedStyle(el);
+      return { backgroundColor: css.backgroundColor, borderColor: css.borderTopColor, textColor: css.color };
+    }
+    return null;
   }
 
   /** The Coming up item behind an added task's element. */
@@ -2887,12 +2903,14 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     return m && this.extraItems ? this.extraItems[Number(m[1])] || null : null;
   }
 
+  /** As with Full Calendar's own tasks: click edits it in the Tasks dialog, Cmd/Ctrl-click opens its note. */
   onExtraClick(e) {
     const it = this.extraItem(extraEl(e.target));
     if (!it) return;
     e.preventDefault();
     e.stopPropagation();
-    this.openTask(it.task);
+    if (e.metaKey || e.ctrlKey) this.openTask(it.task);
+    else this.editTaskInModal(it.task);
   }
 
   onExtraMenu(e) {
@@ -5228,7 +5246,7 @@ class TimeLogSettings extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Show every task in Full Calendar')
       .setDesc('Full Calendar shows tasks on one date (⏳ or 📅, as set in its Tasks settings) and leaves out tasks ' +
-        'that only have the other. Add those to it too, marked with their date. Click one to open it, right-click to ' +
+        'that only have the other. Add those to it too, marked with their date. Click one to edit it (Cmd/Ctrl-click opens its note), right-click to ' +
         'move it, or drag it to another day.')
       .addToggle(t => t.setValue(s.fcAllTasks !== false).onChange(async v => {
         s.fcAllTasks = v;

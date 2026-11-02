@@ -524,15 +524,11 @@ body.theme-dark {
 .wtl-up-details-block:hover .wtl-up-details-remove, .is-mobile .wtl-up-details-remove { opacity: 1; }
 .wtl-up-details-blocklink { cursor: pointer; }
 .wtl-up-details-blocklink:hover { color: var(--text-accent); text-decoration: underline; }
-/* Tasks Full Calendar leaves out, added by this plugin: outlined, so they read as tasks, not events. */
+/* Tasks Full Calendar leaves out, added by this plugin (coloured like its own tasks): dragged natively. */
 .fc .fc-event.wtl-fc-task {
-  background: var(--background-primary);
-  border: 1px dashed var(--text-muted);
   cursor: grab;
   -webkit-user-drag: element;
 }
-.fc .fc-event.wtl-fc-task .fc-event-main,
-.fc .fc-event.wtl-fc-task .fc-event-title { color: var(--text-normal); }
 .fc-event.wtl-flash { animation: wtl-flash 0.85s ease-in-out 3; z-index: 10; }
 @keyframes wtl-flash {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
