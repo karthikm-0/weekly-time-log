@@ -1221,6 +1221,23 @@ class TrackerView extends ItemView {
   }
 }
 
+/**
+ * How many of Full Calendar's cached events (from its API's getEvents) are a second
+ * copy of another: same calendar, same id from the calendar it came from.
+ */
+function duplicateEvents(events) {
+  const seen = new Set();
+  let n = 0;
+  for (const r of events) {
+    const ev = (r.rawEvent && r.rawEvent.event) || {};
+    if (!ev.uid) continue;
+    const k = `${r.calendarId}|${ev.uid}`;
+    if (seen.has(k)) n++;
+    else seen.add(k);
+  }
+  return n;
+}
+
 // ---------------------------------------------------------------------------
 // Coming up: open tasks by the day they're planned for, a few weeks ahead, with
 // the time logged and booked for each. One short line per task; the details are
@@ -1938,6 +1955,8 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     this.registerDomEvent(document, 'dragstart', e => this.onExtraDragStart(e), true);
     // A calendar opened or rebuilt since: give it the tasks again.
     this.registerInterval(window.setInterval(() => this.applyExtraTasks(), 2000));
+    // Events Full Calendar has twice (stale copies): have it rebuild them.
+    this.registerInterval(window.setInterval(() => this.checkDuplicates(), 10 * 1000));
     // New or replaced aTimeLogger exports in the vault folder: re-read and redraw.
     const onFile = file => {
       if (!file || !file.path || !/\.csv$/i.test(file.path)) return;
@@ -2063,6 +2082,41 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     };
     check();
     this.registerInterval(window.setInterval(check, 3000));
+  }
+
+  /**
+   * Full Calendar re-fetches a Google calendar when the mouse comes onto it (at most
+   * every 5 minutes). If that lands while an event is being made there (a task dropped
+   * on a time), it keeps two copies of the event: moving one leaves the other behind
+   * as a "duplicate", and dragging the stale one says "Original event not found". When
+   * that's still so on the next check (not just mid-sync), Full Calendar is asked to
+   * rebuild its events, as it does when a calendar is added or removed.
+   */
+  async checkDuplicates() {
+    if (!this.settings.token || this.checkingDuplicates) return;
+    this.checkingDuplicates = true;
+    try {
+      this.silent = true;
+      const n = duplicateEvents((await this.calendarApi()).getEvents({}, []));
+      if (!n) {
+        this.duplicatesSeen = false;
+        return;
+      }
+      if (!this.duplicatesSeen) {
+        this.duplicatesSeen = true;
+        return;
+      }
+      if (Date.now() - (this.calendarRebuiltAt || 0) < 2 * 60 * 1000) return; // just did; don't loop
+      this.calendarRebuiltAt = Date.now();
+      this.duplicatesSeen = false;
+      console.warn(`Weekly Time Log: Full Calendar has ${plural(n, 'event')} twice; asking it to reload its calendars.`);
+      this.app.workspace.trigger('full-calendar:sources-changed');
+    } catch (e) {
+      // Full Calendar not ready yet
+    } finally {
+      this.silent = false;
+      this.checkingDuplicates = false;
+    }
   }
 
   /** False while the calendar may still be loading (so an empty week might not be empty). */
@@ -2933,7 +2987,11 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     moveMenu(this, it, this.upcomingData, e);
   }
 
-  /** Dragging an added task works as from Coming up: a day moves it there, a time books a block. */
+  /**
+   * Dragging an added task moves it to the day it's dropped on, time or not. It's the
+   * task itself on the calendar, so dropping it never books a new event (that's what
+   * dragging from Coming up is for).
+   */
   onExtraDragStart(e) {
     const el = extraEl(e.target);
     const it = this.extraItem(el);
@@ -2941,7 +2999,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     e.stopPropagation();
     e.dataTransfer.setData('text/plain', it.task.desc);
     e.dataTransfer.effectAllowed = 'copyMove';
-    this.dragging = it;
+    this.dragging = { ...it, moveOnly: true };
     el.addEventListener('dragend', () => this.endDrag(), { once: true });
   }
 
@@ -2956,11 +3014,11 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     e.dataTransfer.dropEffect = 'copy';
     const day = moment(spot.date).format('ddd MMM D');
     const hours = Number(this.settings.blockHours) || 1;
-    const block = this.blockAt(spot);
+    const block = !this.dragging.moveOnly && this.blockAt(spot);
     const at = spot.time && `${fmtSpan(hours)} · ${day}, ${moment(spot.time, 'HH:mm').format('H:mm')}`;
     const text = block
       ? `Use "${block.title}" (${block.start.format('H:mm')}–${block.end.format('H:mm')}) for this`
-      : spot.time
+      : spot.time && !this.dragging.moveOnly
         ? `Book ${at}`
         : `Move to ${day}`;
     if (!this.dropHint) this.dropHint = document.body.createDiv({ cls: 'wtl-drop-hint' });
@@ -3001,7 +3059,7 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     e.preventDefault();
     e.stopPropagation();
     const t = it.task;
-    if (!spot.time) {
+    if (!spot.time || it.moveOnly) {
       await this.setTaskDate(t, spot.date);
       new Notice(`Moved "${t.desc}" to ${moment(spot.date).format('ddd MMM D')}.`);
       return;
@@ -3287,13 +3345,18 @@ module.exports = class WeeklyTimeLogPlugin extends Plugin {
     const overridden = new Set(); // recurring instances replaced by a one-off edit
 
     // `occurrence`: the date of a repeating event's instance (they share one uid).
+    // A key seen already is Full Calendar holding the event twice (see checkDuplicates): count it once.
+    const seen = new Set();
     const add = (calendarId, ev, startM, endM, occurrence = null) => {
       const hours = Math.max(0, (endM.valueOf() - startM.valueOf()) / 36e5);
       if (!hours) return;
+      const keys = blockKeys(calendarId, ev, startM, occurrence);
+      if (seen.has(keys.key)) return;
+      seen.add(keys.key);
       note(calendarId).shown++;
       const title = (ev.title || '').trim() || '(untitled)';
       blocks.push({
-        ...blockKeys(calendarId, ev, startM, occurrence),
+        ...keys,
         calendarId,
         calendar: names.get(calendarId) || calendarId,
         title,
@@ -5331,4 +5394,5 @@ module.exports.parseHours = parseHours;
 module.exports.suggestEstimate = suggestEstimate;
 module.exports.deadlineOf = deadlineOf;
 module.exports.lineOf = lineOf;
+module.exports.duplicateEvents = duplicateEvents;
 module.exports.parseTask = parseTask;
